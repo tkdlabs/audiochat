@@ -1,4 +1,17 @@
-//! Pipeline orchestration, VAD, channel plumbing, and the pluggable
-//! STT / TTS / LLM traits that define the audiochat pipeline.
+//! Core types and pluggable pipeline traits shared across audiochat crates.
 
-#![allow(dead_code)]
+pub mod capture;
+pub mod config;
+pub mod traits;
+pub mod vad;
+
+pub use traits::{Llm, SpeechRecognizer, TextToSpeech};
+
+pub use capture::MicCapture;
+pub use config::AudioConfig;
+pub use vad::EnergyVad;
+
+/// Default capture sample rate in Hz.
+pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
+/// Default number of audio channels.
+pub const CHANNELS: u16 = 1;

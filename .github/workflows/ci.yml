@@ -7,12 +7,18 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  LIBCLANG_PATH: /usr/lib/llvm-18/lib
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install system deps (libclang for bindgen, cmake for whisper.cpp)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libclang-18-dev
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -49,10 +49,15 @@ if streaming complexity demands tokio.
 - CI config (GitHub Actions): build + clippy + fmt on `main` and PRs
 - ADRs / docs notes for pluggable trait design
 
-### M1 — STT path: mic → text
+### M1 — STT path: mic → text  ✅
 - Implement capture (PCM) + VAD segmentation + whisper transcription
 - Trait: `SpeechRecognizer` with a stub/echo impl for offline testing
 - Manual test: speak a phrase, print transcription to stdout
+
+Status: `MicCapture` (cpal), `EnergyVad` (energy-based, frame-wise),
+`WhisperRecognizer` (whisper-rs). CLI wires them together. Needs a downloaded
+whisper GGML model to run. Remaining: resampling to 16 kHz (device native rates
+often differ), echo/stub impl for offline testing.
 
 ### M2 — TTS path: text → audio
 - Implement Piper synthesis + playback to speaker

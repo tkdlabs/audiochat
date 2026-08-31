@@ -31,17 +31,19 @@ Rust workspace. See `PLAN.md` for the detailed first-iteration plan.
 
 ## Getting Started
 
-Requires [Rust](https://rustup.rs) (stable).
+Requires [Rust](https://rustup.rs) (stable), `cmake`, and `libclang` (for building
+whisper.cpp bindings).
 
+Download a whisper model (e.g. [ggml-base.en.bin](https://huggingface.co/ggerganov/whisper.cpp)):
 ```
 cargo build
-cargo run -p audiochat-cli
+cargo run -p audiochat-cli -- path/to/ggml-base.en.bin
 ```
 
 ## Status
 
 - [x] M0 — Workspace scaffold + CI
-- [ ] M1 — Mic → text (capture + VAD + STT)
+- [x] M1 — Mic → text (capture + VAD + STT)
 - [ ] M2 — Text → audio (TTS)
 - [ ] M3 — Text → text (LLM)
 - [ ] M4 — End-to-end speech-to-speech
