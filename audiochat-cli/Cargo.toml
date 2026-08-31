@@ -1,0 +1,15 @@
+[package]
+name = "audiochat-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "audiochat"
+path = "src/main.rs"
+
+[dependencies]
+audiochat-core = { workspace = true }
+audiochat-stt-whisper = { workspace = true }
+audiochat-tts-piper = { workspace = true }
+audiochat-llm = { workspace = true }
