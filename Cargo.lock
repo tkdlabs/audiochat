@@ -71,6 +71,7 @@ name = "audiochat-tts-piper"
 version = "0.1.0"
 dependencies = [
  "audiochat-core",
+ "hound",
 ]
 
 [[package]]

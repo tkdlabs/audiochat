@@ -66,10 +66,19 @@ produces the correct transcript. Live mic confirmed on a C920 webcam
 Remaining: echo/stub impl for offline testing; threading/backoff not yet needed
 at this stage.
 
-### M2 — TTS path: text → audio
+### M2 — TTS path: text → audio  ✅
 - Implement Piper synthesis + playback to speaker
 - Trait: `TextToSpeech`
 - Manual test: feed some text, hear it spoken
+
+Status: `audiochat-tts-piper` (subprocess wrapper around the `piper` CLI; feeds
+text via stdin, reads raw 22.05 kHz PCM, resamples to 16 kHz mono); `play_pcm`
+playback in core; CLI `--speak "<text>" --tts-model <voice.onnx>` mode. Tested
+with `en_US-lessac-medium` voice (played aloud and to a WAV). Piper runs from a
+Python venv via `PIPER_BIN` env var.
+
+Remaining: keep the piper process alive for streaming TTS (M4), espeak/system
+fallback backend.
 
 ### M3 — LLM path: text → text (no audio)
 - Pluggable `Llm` trait; Ollama backend + OpenAI-compatible backend

@@ -50,11 +50,33 @@ cargo run -p audiochat-core --example audio_devices
 cargo run -p audiochat-cli -- --device "C920" models/ggml-tiny.en.bin
 ```
 
+## TTS (Piper)
+
+Piper runs as a subprocess (`audiochat-tts-piper` wraps the `piper` CLI).
+
+```
+# 1. Install piper + a voice model (models/ is gitignored):
+python3 -m venv .venv
+./.venv/bin/pip install piper-tts
+curl -L -o models/voices/en_US-lessac-medium.onnx \
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
+
+# 2. Speak text aloud:
+PIPER_BIN=$PWD/.venv/bin/piper \
+  cargo run -p audiochat-cli -- --speak "Hello world" \
+  --tts-model models/voices/en_US-lessac-medium.onnx
+
+# 3. Offline TTS -> WAV (no playback):
+PIPER_BIN=$PWD/.venv/bin/piper \
+  cargo run -p audiochat-tts-piper --example tts -- \
+  models/voices/en_US-lessac-medium.onnx "Text to a wav file."
+```
+
 ## Status
 
 - [x] M0 — Workspace scaffold + CI
 - [x] M1 — Mic → text (capture + VAD + STT)
-- [ ] M2 — Text → audio (TTS)
+- [x] M2 — Text → audio (TTS + playback)
 - [ ] M3 — Text → text (LLM)
 - [ ] M4 — End-to-end speech-to-speech
 - [ ] M5 — Hardening & latency measurement

@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 audiochat-core = { workspace = true }
+
+[dev-dependencies]
+hound = "3.5"

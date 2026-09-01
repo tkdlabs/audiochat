@@ -8,6 +8,10 @@ target/
 # Models
 models/
 
+# Test output artifacts
+tts_out.wav
+*.out.wav
+
 # Python
 __pycache__/
 *.py[cod]
