@@ -8,6 +8,9 @@ license.workspace = true
 audiochat-core = { workspace = true }
 whisper-rs = "0.16"
 
+[dev-dependencies]
+hound = "3.5"
+
 [features]
 default = []
 # Build with CUDA support (requires CUDA toolkit).

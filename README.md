@@ -34,10 +34,16 @@ Rust workspace. See `PLAN.md` for the detailed first-iteration plan.
 Requires [Rust](https://rustup.rs) (stable), `cmake`, and `libclang` (for building
 whisper.cpp bindings).
 
-Download a whisper model (e.g. [ggml-base.en.bin](https://huggingface.co/ggerganov/whisper.cpp)):
 ```
-cargo build
-cargo run -p audiochat-cli -- path/to/ggml-base.en.bin
+# 1. Download a whisper model into models/ (gitignored), e.g.:
+curl -L -o models/ggml-tiny.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+
+# 2. Offline STT validation on a WAV:
+cargo run -p audiochat-stt-whisper --example transcribe -- models/ggml-tiny.en.bin test.wav
+
+# 3. Live mic -> text:
+cargo run -p audiochat-cli -- models/ggml-tiny.en.bin
 ```
 
 ## Status

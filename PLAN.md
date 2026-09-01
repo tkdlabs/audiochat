@@ -54,10 +54,17 @@ if streaming complexity demands tokio.
 - Trait: `SpeechRecognizer` with a stub/echo impl for offline testing
 - Manual test: speak a phrase, print transcription to stdout
 
-Status: `MicCapture` (cpal), `EnergyVad` (energy-based, frame-wise),
-`WhisperRecognizer` (whisper-rs). CLI wires them together. Needs a downloaded
-whisper GGML model to run. Remaining: resampling to 16 kHz (device native rates
-often differ), echo/stub impl for offline testing.
+Status: `MicCapture` (cpal) resamples native device audio to 16 kHz mono i16;
+`EnergyVad` (energy-based, frame-wise); `WhisperRecognizer` (whisper-rs,
+`ggml-tiny.en.bin` downloaded to `models/`). CLI wires them together.
+
+Validated with the whisper.cpp JFK sample via
+`cargo run -p audiochat-stt-whisper --example transcribe -- models/ggml-tiny.en.bin <wav>` —
+produces the correct transcript. Real-mic spoken transcription still needs a
+manual test on hardware (headless CI can't feed a mic).
+
+Remaining: echo/stub impl for offline testing; threading/backoff not yet needed
+at this stage.
 
 ### M2 — TTS path: text → audio
 - Implement Piper synthesis + playback to speaker
