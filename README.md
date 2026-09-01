@@ -75,7 +75,10 @@ PIPER_BIN=$PWD/.venv/bin/piper \
 ## LLM (Ollama)
 
 The LLM backend is pluggable; the Ollama client talks to the streaming
-`/api/generate` endpoint.
+`/api/chat` endpoint and keeps a bounded multi-turn conversation history, so in
+`--s2s` each spoken question builds on the prior turns. History is capped (10
+turns by default) with the oldest turns dropped; call `reset_conversation()` on
+the client to clear it.
 
 ```
 # Ask Ollama a question (it must be running on localhost:11434):

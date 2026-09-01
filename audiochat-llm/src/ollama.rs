@@ -1,39 +1,72 @@
-//! Ollama LLM backend using the `/api/generate` streaming endpoint.
+//! Ollama LLM backend using `/api/chat` with multi-turn conversation history.
 
 use std::error::Error;
 use std::fmt;
 use std::io::{BufRead, BufReader};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use audiochat_core::{Llm, LlmResponse, LlmStreamItem};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_BASE: &str = "http://localhost:11434";
+const DEFAULT_MAX_TURNS: usize = 10;
+
+/// A message in the conversation history (role + content).
+#[derive(Serialize, Clone)]
+pub struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+impl ChatMessage {
+    fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".into(),
+            content: content.into(),
+        }
+    }
+
+    fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: content.into(),
+        }
+    }
+}
 
 /// An LLM client for a local [Ollama](https://ollama.com) server.
 pub struct Ollama {
     base_url: String,
     model: String,
     client: ureq::Agent,
+    history: Arc<Mutex<Vec<ChatMessage>>>,
+    max_turns: usize,
 }
 
-/// Request body for `/api/generate`.
+/// Request body for `/api/chat`.
 #[derive(Serialize)]
-struct GenerateRequest<'a> {
+struct ChatRequest<'a> {
     model: &'a str,
-    prompt: &'a str,
+    messages: &'a [ChatMessage],
     stream: bool,
 }
 
-/// Per-chunk response line from the streaming `/api/generate` endpoint.
+/// Per-chunk response line from the streaming `/api/chat` endpoint.
 #[derive(Deserialize)]
-struct GenerateChunk {
+struct ChatChunk {
     #[serde(default)]
-    response: String,
+    message: Option<ChatMessageOut>,
     #[serde(default)]
     done: bool,
     #[serde(default)]
     error: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ChatMessageOut {
+    #[serde(default)]
+    content: String,
 }
 
 #[derive(Debug)]
@@ -64,6 +97,8 @@ impl Ollama {
             base_url: base_url.into(),
             model: model.into(),
             client,
+            history: Arc::new(Mutex::new(Vec::new())),
+            max_turns: DEFAULT_MAX_TURNS,
         }
     }
 
@@ -71,14 +106,53 @@ impl Ollama {
     pub fn model(&self) -> &str {
         &self.model
     }
+
+    /// Number of conversation turns (user+assistant pairs) retained.
+    pub fn max_turns(&self) -> usize {
+        self.max_turns
+    }
+
+    /// Set the maximum number of turns kept in context (oldest dropped).
+    pub fn set_max_turns(&mut self, turns: usize) {
+        self.max_turns = turns.max(1);
+    }
+
+    /// Clear the conversation history.
+    pub fn reset_conversation(&self) {
+        if let Ok(mut h) = self.history.lock() {
+            h.clear();
+        }
+    }
+
+    /// Number of messages currently held in context.
+    pub fn history_len(&self) -> usize {
+        self.history.lock().map(|h| h.len()).unwrap_or(0)
+    }
+
+    fn trim_history(&self) {
+        if let Ok(mut h) = self.history.lock() {
+            let max_msgs = self.max_turns * 2;
+            if h.len() > max_msgs {
+                let excess = h.len() - max_msgs;
+                h.drain(0..excess);
+            }
+        }
+    }
 }
 
 impl Llm for Ollama {
     fn generate(&self, prompt: &str) -> Result<LlmResponse, Box<dyn Error + Send + Sync>> {
-        let url = format!("{}/api/generate", self.base_url);
-        let body = GenerateRequest {
+        // Record the user turn, then hand the full history to the model.
+        if let Ok(mut h) = self.history.lock() {
+            h.push(ChatMessage::user(prompt));
+        }
+        self.trim_history();
+
+        let url = format!("{}/api/chat", self.base_url);
+        let snapshot = self.history.lock().map(|h| h.clone()).unwrap_or_default();
+        let body = ChatRequest {
             model: &self.model,
-            prompt,
+            messages: &snapshot,
             stream: true,
         };
 
@@ -96,7 +170,11 @@ impl Llm for Ollama {
         }
 
         let reader = BufReader::new(resp.into_body().into_reader());
-        let stream = OllamaStream { reader };
+        let stream = OllamaStream {
+            reader,
+            accum: String::new(),
+            history: Some(self.history.clone()),
+        };
         Ok(LlmResponse {
             stream: Some(Box::new(stream)),
             full: String::new(),
@@ -104,9 +182,12 @@ impl Llm for Ollama {
     }
 }
 
-/// Lazily parses the newline-delimited Ollama stream into text chunks.
+/// Lazily parses the newline-delimited Ollama `/api/chat` stream into text
+/// chunks, accumulating the full assistant reply into the conversation history.
 struct OllamaStream {
     reader: BufReader<ureq::BodyReader<'static>>,
+    accum: String,
+    history: Option<Arc<Mutex<Vec<ChatMessage>>>>,
 }
 
 impl Iterator for OllamaStream {
@@ -115,20 +196,27 @@ impl Iterator for OllamaStream {
     fn next(&mut self) -> Option<Self::Item> {
         let mut line = String::new();
         match self.reader.read_line(&mut line) {
-            Ok(0) => None, // EOF
+            Ok(0) => {
+                // Malformed stream ended without a done flag; save what we have.
+                self.save_assistant();
+                None
+            }
             Ok(_) => {
                 let line = line.trim();
                 if line.is_empty() {
                     return Some(Ok(String::new()));
                 }
-                match serde_json::from_str::<GenerateChunk>(line) {
+                match serde_json::from_str::<ChatChunk>(line) {
                     Ok(chunk) => {
                         if let Some(err) = chunk.error {
                             Some(Err(Box::<dyn Error + Send + Sync>::from(OllamaError(err))))
                         } else if chunk.done {
+                            self.save_assistant();
                             None
                         } else {
-                            Some(Ok(chunk.response))
+                            let text = chunk.message.map(|m| m.content).unwrap_or_default();
+                            self.accum.push_str(&text);
+                            Some(Ok(text))
                         }
                     }
                     Err(e) => Some(Err(Box::<dyn Error + Send + Sync>::from(OllamaError(
@@ -140,5 +228,65 @@ impl Iterator for OllamaStream {
                 format!("read stream: {e}"),
             )))),
         }
+    }
+}
+
+impl OllamaStream {
+    /// Append the accumulated reply as an assistant turn, then clear it.
+    fn save_assistant(&mut self) {
+        let content = std::mem::take(&mut self.accum);
+        if content.is_empty() {
+            return;
+        }
+        if let Some(history) = &self.history {
+            if let Ok(mut h) = history.lock() {
+                h.push(ChatMessage::assistant(content));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_trim_drops_oldest_turns() {
+        let mut client = Ollama::with_base("http://localhost:11434", "test-model");
+        client.set_max_turns(2);
+        // Simulate the message growth a multi-turn conversation would produce.
+        for i in 0..6 {
+            {
+                let mut h = client.history.lock().unwrap();
+                h.push(ChatMessage::user(format!("user {i}")));
+                h.push(ChatMessage::assistant(format!("assistant {i}")));
+            }
+            client.trim_history();
+        }
+        // max_turns=2 -> 4 messages retained (2 most recent pairs).
+        assert_eq!(client.history_len(), 4);
+        let h = client.history.lock().unwrap();
+        assert_eq!(h[0].content, "user 4");
+        assert_eq!(h[1].content, "assistant 4");
+        assert_eq!(h[3].content, "assistant 5");
+    }
+
+    #[test]
+    fn reset_conversation_clears_history() {
+        let client = Ollama::with_base("http://localhost:11434", "test-model");
+        {
+            let mut h = client.history.lock().unwrap();
+            h.push(ChatMessage::user("hi"));
+        }
+        assert_eq!(client.history_len(), 1);
+        client.reset_conversation();
+        assert_eq!(client.history_len(), 0);
+    }
+
+    #[test]
+    fn set_max_turns_is_at_least_one() {
+        let mut client = Ollama::with_base("http://localhost:11434", "test-model");
+        client.set_max_turns(0);
+        assert_eq!(client.max_turns(), 1);
     }
 }

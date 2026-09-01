@@ -88,7 +88,8 @@ Status: `audiochat-llm` crate with `Ollama` backend using ureq (sync, small foot
 against Ollama's `/api/generate` streaming endpoint. CLI `--prompt "<text>" --llm-model <name>`
 mode streams the reply token-by-token. Tested with `gemma4:e2b` on localhost.
 
-Remaining: OpenAI-compatible backend (trivial swap); conversation context/multi-turn.
+Remaining: OpenAI-compatible backend (trivial swap). Multi-turn conversation
+context landed later (see M4 planning note).
 
 ### M4 — Integration: end-to-end speech-to-speech  ✅
 - Wire M1+M2+M3 through the pipeline
@@ -124,6 +125,15 @@ Remaining: mic-audio validation of the s2s loop on real hardware (headless env
 can only initialize the pipeline); OpenAI-compatible LLM backend; multi-turn
 context.
 
+Multi-turn context: done — `Ollama` now uses `/api/chat` with a bounded
+conversation history held internally (transparent to the `Llm` trait). The
+client appends each user turn, streams the reply, and stores the assistant turn;
+oldest turns beyond `max_turns` (default 10) are trimmed. Exposes
+`reset_conversation()`, `set_max_turns()`, `history_len()`. Verified live on
+Ollama (turn 1 introduced a fact, turn 2 recalled it) plus unit tests for
+trim/reset. `--s2s` inherits this automatically since the client persists for
+the session.
+
 ## Success criteria for iteration 1
 
 - Clean end-to-end loop: spoken question → spoken answer
@@ -136,6 +146,5 @@ context.
 
 - Wake-word / always-on interruption handling
 - Noise suppression / echo cancellation
-- Multi-turn conversation memory / context management
 - Mobile/embedded deployment packaging
 - Caching, buffering optimizations
