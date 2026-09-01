@@ -96,7 +96,12 @@ PIPER_BIN=$PWD/.venv/bin/piper cargo run -p audiochat-cli -- --s2s \
   --llm-model gemma4:e2b
 ```
 
-Add `--silent` to print replies without speaking them.
+Add `--silent` to print replies without speaking them. Add `--verbose` to print
+per-turn latency breakdown (STT → first-token → first-audio → stream end →
+total). All options have `AUDIOCHAT_*` env-var fallbacks (`AUDIOCHAT_DEVICE`,
+`AUDIOCHAT_TTS_MODEL`, `AUDIOCHAT_TTS_BIN`, `AUDIOCHAT_LLM_MODEL`,
+`AUDIOCHAT_LLM_URL`); flags take precedence. `--s2s` handles Ctrl-C gracefully,
+flushing the pending utterance before exit.
 
 ## Status
 
@@ -105,4 +110,4 @@ Add `--silent` to print replies without speaking them.
 - [x] M2 — Text → audio (TTS + playback)
 - [x] M3 — Text → text (LLM client)
 - [x] M4 — End-to-end speech-to-speech
-- [ ] M5 — Hardening & latency measurement
+- [x] M5 — Hardening & measurement

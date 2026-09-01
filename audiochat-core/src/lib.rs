@@ -14,7 +14,7 @@ pub use traits::{Llm, LlmResponse, LlmStream, LlmStreamItem, SpeechRecognizer, T
 pub use audio_sink::AudioSink;
 pub use capture::MicCapture;
 pub use config::AudioConfig;
-pub use pipeline::Pipeline;
+pub use pipeline::{Pipeline, TurnTiming};
 pub use playback::play_pcm;
 pub use resample::LinearResampler;
 pub use vad::EnergyVad;

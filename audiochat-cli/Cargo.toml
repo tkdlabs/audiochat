@@ -13,3 +13,4 @@ audiochat-core = { workspace = true }
 audiochat-stt-whisper = { workspace = true }
 audiochat-tts-piper = { workspace = true }
 audiochat-llm = { workspace = true }
+ctrlc = "3"

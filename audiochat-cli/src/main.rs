@@ -25,8 +25,16 @@ Options:
   --tts-bin PATH      Piper executable (default: $PIPER_BIN or \"piper\").
   --llm-model NAME    Ollama model name for --prompt/--s2s.
   --llm-url URL       Ollama base URL (default: http://localhost:11434).
+  -v, --verbose       Print per-turn latency metrics in --s2s.
   --silent            In --s2s, print replies but do not speak them.
-  -h, --help          Show this help.";
+  -h, --help          Show this help.
+
+Environment (flag takes precedence):
+  AUDIOCHAT_DEVICE     input device substring
+  AUDIOCHAT_TTS_MODEL  piper voice path
+  AUDIOCHAT_TTS_BIN    piper executable (falls back to PIPER_BIN)
+  AUDIOCHAT_LLM_MODEL  ollama model name
+  AUDIOCHAT_LLM_URL    ollama base URL";
 
 struct Opts {
     model: Option<PathBuf>,
@@ -39,6 +47,12 @@ struct Opts {
     llm_url: Option<String>,
     s2s: bool,
     silent: bool,
+    verbose: bool,
+}
+
+/// Resolve a CLI flag value, falling back to an environment variable.
+fn opt_or_env(cli: Option<String>, env: &str) -> Option<String> {
+    cli.or_else(|| std::env::var(env).ok().filter(|s| !s.is_empty()))
 }
 
 fn parse_args(args: &[String]) -> Result<Opts, String> {
@@ -52,6 +66,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut llm_url: Option<String> = None;
     let mut s2s = false;
     let mut silent = false;
+    let mut verbose = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -62,6 +77,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
             }
             "--s2s" => s2s = true,
             "--silent" => silent = true,
+            "-v" | "--verbose" => verbose = true,
             "--speak" => {
                 i += 1;
                 let text = args.get(i).ok_or("--speak requires text")?;
@@ -103,15 +119,17 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     }
     Ok(Opts {
         model,
-        device,
+        device: opt_or_env(device, "AUDIOCHAT_DEVICE"),
         speak,
-        tts_model,
-        tts_bin,
+        tts_model: tts_model
+            .or_else(|| std::env::var("AUDIOCHAT_TTS_MODEL").ok().map(PathBuf::from)),
+        tts_bin: opt_or_env(tts_bin, "AUDIOCHAT_TTS_BIN"),
         prompt,
-        llm_model,
-        llm_url,
+        llm_model: opt_or_env(llm_model, "AUDIOCHAT_LLM_MODEL"),
+        llm_url: opt_or_env(llm_url, "AUDIOCHAT_LLM_URL"),
         s2s,
         silent,
+        verbose,
     })
 }
 
@@ -218,14 +236,32 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
 
     let mut pipeline = Pipeline::new(stt, llm, tts);
     pipeline.speak_replies = !opts.silent;
+    pipeline.verbose = opts.verbose;
     let mic = MicCapture::start_with_device(AudioConfig::default(), opts.device.as_deref())?;
 
+    let (sig_tx, sig_rx) = std::sync::mpsc::channel();
+    ctrlc::set_handler(move || {
+        let _ = sig_tx.send(());
+    })
+    .map_err(|e| format!("failed to install signal handler: {e}"))?;
+
     println!("audiochat: speech-to-speech mode. Speak to ask; Ctrl-C to stop.");
-    while let Ok(pcm) = mic.rx.recv() {
-        pipeline.feed(&pcm)?;
+    loop {
+        if sig_rx.try_recv().is_ok() {
+            println!("\naudiochat: stopping...");
+            pipeline.flush()?;
+            return Ok(());
+        }
+        match mic.rx.recv() {
+            Ok(pcm) => {
+                pipeline.feed(&pcm)?;
+            }
+            Err(_) => {
+                pipeline.flush()?;
+                return Ok(());
+            }
+        }
     }
-    pipeline.flush()?;
-    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

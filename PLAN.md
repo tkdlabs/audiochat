@@ -106,11 +106,23 @@ Remaining: true token-by-token streaming TTS (piper reads all stdin to EOF, so
 sentence-chunked synthesis is the current design); mic-audio validation of the
 s2s loop on real hardware.
 
-### M5 — Hardening & measurement
+### M5 — Hardening & measurement  ✅
 - Latency instrumentation per stage (capture→VAD→STT→LLM→first-audio)
 - Error handling / backoff for backend unavailability
 - Config via env or a small config file (backend URL, model, device)
 - Clean shutdown / resource release
+
+Status: `Pipeline` records a `TurnTiming` per spoken turn (STT, first-token,
+first-audio, full-stream, total latencies) printed to stderr when `--verbose` is
+on. Transient LLM/TTS failures retry with
+exponential backoff (`with_retry`). CLI options read `AUDIOCHAT_*` env vars as
+fallbacks (flag takes precedence). Graceful SIGINT shutdown in `--s2s` flushes
+the pending VAD utterance before exiting (via the `ctrlc` crate). Backends
+(Ollama/Piper/whisper) are constructed identically to M1-M3.
+
+Remaining: mic-audio validation of the s2s loop on real hardware (headless env
+can only initialize the pipeline); OpenAI-compatible LLM backend; multi-turn
+context.
 
 ## Success criteria for iteration 1
 
