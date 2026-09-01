@@ -71,7 +71,7 @@ impl TurnTiming {
 /// Orchestrates mic -> VAD -> STT -> LLM -> TTS -> playback.
 pub struct Pipeline {
     vad: EnergyVad,
-    pub stt: Box<dyn SpeechRecognizer>,
+    stt: Box<dyn SpeechRecognizer>,
     pub llm: Box<dyn Llm>,
     tts: Box<dyn TextToSpeech>,
     cfg: AudioConfig,
@@ -80,6 +80,10 @@ pub struct Pipeline {
     pub speak_replies: bool,
     /// Whether to print per-turn latency metrics to stderr.
     pub verbose: bool,
+    /// RMS threshold (0..1) above which a frame counts as speech.
+    vad_threshold: f32,
+    /// Trailing silence (ms) that ends an utterance.
+    vad_max_silence_ms: u64,
 }
 
 impl Pipeline {
@@ -97,7 +101,26 @@ impl Pipeline {
             sink: None,
             speak_replies: true,
             verbose: false,
+            vad_threshold: 0.02,
+            vad_max_silence_ms: 600,
         }
+    }
+
+    /// Set the VAD RMS threshold (0..1) above which audio counts as speech.
+    ///
+    /// A higher value treats signal more leniently as silence, so a lower mic
+    /// gain / quiet room is less likely to be mistaken for continuous speech.
+    pub fn with_vad_threshold(mut self, threshold: f32) -> Self {
+        self.vad_threshold = threshold.clamp(0.0, 1.0);
+        self.vad = self.vad.with_threshold(self.vad_threshold);
+        self
+    }
+
+    /// Set the trailing silence (ms) that ends a spoken utterance.
+    pub fn with_vad_max_silence(mut self, ms: u64) -> Self {
+        self.vad_max_silence_ms = ms;
+        self.vad = self.vad.with_max_silence(ms);
+        self
     }
 
     /// Process a block of raw mic PCM, returning any transcripts produced.

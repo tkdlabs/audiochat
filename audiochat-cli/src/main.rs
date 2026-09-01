@@ -25,6 +25,8 @@ Options:
   --tts-bin PATH      Piper executable (default: $PIPER_BIN or \"piper\").
   --llm-model NAME    Ollama model name for --prompt/--s2s.
   --llm-url URL       Ollama base URL (default: http://localhost:11434).
+  --vad-threshold F   VAD RMS threshold (0..1); raise if pauses aren't detected.
+  --vad-silence MS    Trailing silence (ms) that ends an utterance (default 600).
   -v, --verbose       Print per-turn latency metrics in --s2s.
   --silent            In --s2s, print replies but do not speak them.
   -h, --help          Show this help.
@@ -48,6 +50,8 @@ struct Opts {
     s2s: bool,
     silent: bool,
     verbose: bool,
+    vad_threshold: Option<f32>,
+    vad_silence_ms: Option<u64>,
 }
 
 /// Resolve a CLI flag value, falling back to an environment variable.
@@ -67,6 +71,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut s2s = false;
     let mut silent = false;
     let mut verbose = false;
+    let mut vad_threshold: Option<f32> = None;
+    let mut vad_silence_ms: Option<u64> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -108,6 +114,21 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 let p = args.get(i).ok_or("--tts-bin requires a path")?;
                 tts_bin = Some(p.clone());
             }
+            "--vad-threshold" => {
+                i += 1;
+                let s = args.get(i).ok_or("--vad-threshold requires a value")?;
+                let v: f32 = s.parse().map_err(|_| "--vad-threshold must be a number")?;
+                if !(0.0..=1.0).contains(&v) {
+                    return Err("--vad-threshold must be in 0..1".into());
+                }
+                vad_threshold = Some(v);
+            }
+            "--vad-silence" => {
+                i += 1;
+                let s = args.get(i).ok_or("--vad-silence requires a value")?;
+                let v: u64 = s.parse().map_err(|_| "--vad-silence must be a number")?;
+                vad_silence_ms = Some(v);
+            }
             "--help" | "-h" => return Err(USAGE.to_string()),
             flag if flag.starts_with('-') => {
                 return Err(format!("unknown option: {flag}\n{USAGE}"))
@@ -130,6 +151,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         s2s,
         silent,
         verbose,
+        vad_threshold,
+        vad_silence_ms,
     })
 }
 
@@ -235,6 +258,12 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     let tts = Box::new(Piper::with_bin(tts_bin, tts_model)?);
 
     let mut pipeline = Pipeline::new(stt, llm, tts);
+    if let Some(t) = opts.vad_threshold {
+        pipeline = pipeline.with_vad_threshold(t);
+    }
+    if let Some(ms) = opts.vad_silence_ms {
+        pipeline = pipeline.with_vad_max_silence(ms);
+    }
     pipeline.speak_replies = !opts.silent;
     pipeline.verbose = opts.verbose;
     let mic = MicCapture::start_with_device(AudioConfig::default(), opts.device.as_deref())?;
