@@ -80,9 +80,15 @@ Python venv via `PIPER_BIN` env var.
 Remaining: keep the piper process alive for streaming TTS (M4), espeak/system
 fallback backend.
 
-### M3 — LLM path: text → text (no audio)
+### M3 — LLM path: text → text (no audio)  ✅
 - Pluggable `Llm` trait; Ollama backend + OpenAI-compatible backend
 - Manual test: prompt typed at CLI, streamed text reply printed
+
+Status: `audiochat-llm` crate with `Ollama` backend using ureq (sync, small footprint)
+against Ollama's `/api/generate` streaming endpoint. CLI `--prompt "<text>" --llm-model <name>`
+mode streams the reply token-by-token. Tested with `gemma4:e2b` on localhost.
+
+Remaining: OpenAI-compatible backend (trivial swap); conversation context/multi-turn.
 
 ### M4 — Integration: end-to-end speech-to-speech
 - Wire M1+M2+M3 through the pipeline

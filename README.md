@@ -72,11 +72,22 @@ PIPER_BIN=$PWD/.venv/bin/piper \
   models/voices/en_US-lessac-medium.onnx "Text to a wav file."
 ```
 
+## LLM (Ollama)
+
+The LLM backend is pluggable; the Ollama client talks to the streaming
+`/api/generate` endpoint.
+
+```
+# Ask Ollama a question (it must be running on localhost:11434):
+ollama pull gemma4:e2b   # or any installed model
+cargo run -p audiochat-cli -- --prompt "What is 2+2?" --llm-model gemma4:e2b
+```
+
 ## Status
 
 - [x] M0 — Workspace scaffold + CI
 - [x] M1 — Mic → text (capture + VAD + STT)
 - [x] M2 — Text → audio (TTS + playback)
-- [ ] M3 — Text → text (LLM)
+- [x] M3 — Text → text (LLM client)
 - [ ] M4 — End-to-end speech-to-speech
 - [ ] M5 — Hardening & latency measurement

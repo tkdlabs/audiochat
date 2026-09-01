@@ -7,7 +7,7 @@ pub mod resample;
 pub mod traits;
 pub mod vad;
 
-pub use traits::{Llm, SpeechRecognizer, TextToSpeech};
+pub use traits::{Llm, LlmResponse, LlmStream, LlmStreamItem, SpeechRecognizer, TextToSpeech};
 
 pub use capture::MicCapture;
 pub use config::AudioConfig;

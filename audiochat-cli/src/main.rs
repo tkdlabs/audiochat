@@ -1,10 +1,11 @@
-//! audiochat CLI: speech-to-text (default) or text-to-speech test (`--speak`).
+//! audiochat CLI: speech-to-text (default), TTS test (`--speak`), or LLM test (`--prompt`).
 
 use std::path::PathBuf;
 
 use audiochat_core::{
-    play_pcm, AudioConfig, EnergyVad, MicCapture, SpeechRecognizer, TextToSpeech,
+    play_pcm, AudioConfig, EnergyVad, Llm, MicCapture, SpeechRecognizer, TextToSpeech,
 };
+use audiochat_llm::Ollama;
 use audiochat_stt_whisper::WhisperRecognizer;
 use audiochat_tts_piper::Piper;
 
@@ -14,11 +15,14 @@ usage: audiochat [OPTIONS] <whisper-model.bin>
 Modes:
   (default)   Live mic -> text using the whisper model.
   --speak T   Synthesize T with Piper and play it (requires --tts-model).
+  --prompt T  Send T to an LLM (Ollama) and print the streamed reply.
 
 Options:
   -d, --device NAME   Match an input device by name (case-insensitive substring).
   --tts-model PATH    Piper ONNX voice model for --speak mode.
   --tts-bin PATH      Piper executable (default: $PIPER_BIN or \"piper\").
+  --llm-model NAME    Ollama model name for --prompt mode.
+  --llm-url URL       Ollama base URL (default: http://localhost:11434).
   -h, --help          Show this help.";
 
 struct Opts {
@@ -27,6 +31,9 @@ struct Opts {
     speak: Option<String>,
     tts_model: Option<PathBuf>,
     tts_bin: Option<String>,
+    prompt: Option<String>,
+    llm_model: Option<String>,
+    llm_url: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<Opts, String> {
@@ -35,6 +42,9 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut speak: Option<String> = None;
     let mut tts_model: Option<PathBuf> = None;
     let mut tts_bin: Option<String> = None;
+    let mut prompt: Option<String> = None;
+    let mut llm_model: Option<String> = None;
+    let mut llm_url: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -47,6 +57,21 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 i += 1;
                 let text = args.get(i).ok_or("--speak requires text")?;
                 speak = Some(text.clone());
+            }
+            "--prompt" => {
+                i += 1;
+                let text = args.get(i).ok_or("--prompt requires text")?;
+                prompt = Some(text.clone());
+            }
+            "--llm-model" => {
+                i += 1;
+                let name = args.get(i).ok_or("--llm-model requires a name")?;
+                llm_model = Some(name.clone());
+            }
+            "--llm-url" => {
+                i += 1;
+                let m = args.get(i).ok_or("--llm-url requires a URL")?;
+                llm_url = Some(m.clone());
             }
             "--tts-model" => {
                 i += 1;
@@ -67,14 +92,44 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         }
         i += 1;
     }
-    let model = model;
     Ok(Opts {
         model,
         device,
         speak,
         tts_model,
         tts_bin,
+        prompt,
+        llm_model,
+        llm_url,
     })
+}
+
+fn run_llm(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let model = opts
+        .llm_model
+        .clone()
+        .ok_or("--prompt requires --llm-model <ollama-model>")?;
+    let base = opts
+        .llm_url
+        .clone()
+        .unwrap_or_else(|| "http://localhost:11434".to_string());
+    let client = Ollama::with_base(base, model);
+    let prompt = opts.prompt.as_deref().unwrap_or_default();
+
+    println!("audiochat: asking ollama ({})...", client.model());
+    let mut resp = client.generate(prompt)?;
+    if let Some(stream) = resp.stream.take() {
+        for item in stream {
+            let chunk = item?;
+            print!("{chunk}");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+    }
+    if !resp.full.is_empty() {
+        print!("{}", resp.full);
+    }
+    println!();
+    Ok(())
 }
 
 fn run_tts(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -127,6 +182,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let opts = parse_args(&args).map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
 
+    if opts.prompt.is_some() {
+        return run_llm(&opts);
+    }
     if opts.speak.is_some() {
         run_tts(&opts)
     } else {
