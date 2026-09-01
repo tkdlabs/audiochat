@@ -283,7 +283,14 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         }
         match mic.rx.recv() {
             Ok(pcm) => {
-                pipeline.feed(&pcm)?;
+                let replies = pipeline.feed(&pcm)?;
+                if !replies.is_empty() {
+                    // Half-duplex turn-taking: wait for the reply to finish
+                    // playing, then discard any audio captured during playback
+                    // (the assistant's own voice) before listening again.
+                    pipeline.wait_playback_done()?;
+                    while mic.rx.try_recv().is_ok() {}
+                }
             }
             Err(_) => {
                 pipeline.flush()?;

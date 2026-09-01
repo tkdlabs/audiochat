@@ -205,14 +205,33 @@ impl Pipeline {
         if text.is_empty() {
             return Ok(());
         }
-        if self.speak_replies && self.sink.is_none() {
-            self.sink = Some(AudioSink::new(self.cfg));
-        }
+        self.ensure_sink()?;
         let pcm = with_retry("tts synthesize", 2, 200, || self.tts.synthesize(text))?;
         if self.speak_replies && !pcm.is_empty() {
             if let Some(sink) = &self.sink {
                 sink.push(pcm);
             }
+        }
+        Ok(())
+    }
+
+    /// Lazily open the audio sink if replies are to be spoken.
+    fn ensure_sink(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if self.speak_replies && self.sink.is_none() {
+            self.sink = Some(AudioSink::new(self.cfg)?);
+        }
+        Ok(())
+    }
+
+    /// Block until all synthesized audio for the current reply has finished
+    /// playing. Used for half-duplex turn-taking: the pipeline should not
+    /// listen for the next utterance until the previous reply has completed.
+    pub fn wait_playback_done(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if self.speak_replies {
+            self.ensure_sink()?;
+        }
+        if let Some(sink) = &self.sink {
+            sink.drain();
         }
         Ok(())
     }

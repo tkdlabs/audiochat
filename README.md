@@ -90,7 +90,14 @@ cargo run -p audiochat-cli -- --prompt "What is 2+2?" --llm-model gemma4:e2b
 
 `--s2s` drives the full loop: mic -> VAD -> STT -> LLM -> Piper -> speaker.
 LLM tokens stream to the console in real time while each completed sentence is
-synthesized and played on a background thread (sequential, non-blocking).
+synthesized and played. Turn-taking is **half-duplex**: the app stops listening
+while a reply is being spoken (so it doesn't hear the assistant's own voice),
+waits for the reply audio to finish, discards any mic audio captured during
+playback, then listens for your next question.
+
+Playback uses a single persistent output stream (opened once, sequential
+queue) rather than opening the device per chunk, which avoids ALSA "I/O error"
+churn from rapid open/close cycles.
 
 ```
 PIPER_BIN=$PWD/.venv/bin/piper cargo run -p audiochat-cli -- --s2s \
