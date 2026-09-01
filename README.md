@@ -44,6 +44,10 @@ cargo run -p audiochat-stt-whisper --example transcribe -- models/ggml-tiny.en.b
 
 # 3. Live mic -> text:
 cargo run -p audiochat-cli -- models/ggml-tiny.en.bin
+
+# List input devices, then pick one by name (case-insensitive substring):
+cargo run -p audiochat-core --example audio_devices
+cargo run -p audiochat-cli -- --device "C920" models/ggml-tiny.en.bin
 ```
 
 ## Status

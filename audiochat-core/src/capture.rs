@@ -51,6 +51,44 @@ impl LinearResampler {
     }
 }
 
+/// Selects an input device by case-insensitive substring match on its name.
+fn select_input_device(
+    host: &cpal::Host,
+    name: &str,
+) -> Result<cpal::Device, Box<dyn Error + Send + Sync>> {
+    let needle = name.to_lowercase();
+    let mut best: Option<cpal::Device> = None;
+    for device in host
+        .input_devices()
+        .map_err(|e| format!("failed to enumerate input devices: {e}"))?
+    {
+        let d = device.to_string();
+        if d.to_lowercase().contains(&needle) {
+            best = Some(device);
+        }
+    }
+    best.ok_or_else(|| {
+        {
+            let names: Vec<String> = host
+                .input_devices()
+                .ok()
+                .into_iter()
+                .flatten()
+                .map(|d| d.to_string())
+                .collect();
+            format!(
+                "no input device matching '{name}'. Available inputs: {}",
+                if names.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    names.join(", ")
+                }
+            )
+        }
+        .into()
+    })
+}
+
 /// Shared state used by the capture callback: a resampler plus the output
 /// channel. Only the resampler is mutated.
 struct SharedOutput {
@@ -74,15 +112,31 @@ impl SharedOutput {
 impl MicCapture {
     /// Start capturing from the default input device, resampled to `cfg`.
     pub fn start(cfg: AudioConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Self::start_with_device(cfg, None)
+    }
+
+    /// Start capturing from an input device selected by name, resampled to `cfg`.
+    ///
+    /// When `device_name` is `None`, the default input device is used. The name
+    /// is matched as a case-insensitive substring against available input devices.
+    pub fn start_with_device(
+        cfg: AudioConfig,
+        device_name: Option<&str>,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or("no default input device")?;
+        let device = match device_name {
+            Some(name) => select_input_device(&host, name)?,
+            None => host
+                .default_input_device()
+                .ok_or("no default input device")?,
+        };
+        let device_desc = device.to_string();
         let supported = device.default_input_config()?;
         let sample_format = supported.sample_format();
         let native_rate = supported.sample_rate();
         let native_channels = supported.channels() as usize;
         let config: cpal::StreamConfig = supported.into();
+        eprintln!("audiochat: using input device '{device_desc}' ({native_rate} Hz, {native_channels} ch)");
 
         let (tx, rx) = mpsc::channel::<Vec<i16>>();
         let shared = Arc::new(SharedOutput {

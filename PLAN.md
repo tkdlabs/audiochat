@@ -60,8 +60,8 @@ Status: `MicCapture` (cpal) resamples native device audio to 16 kHz mono i16;
 
 Validated with the whisper.cpp JFK sample via
 `cargo run -p audiochat-stt-whisper --example transcribe -- models/ggml-tiny.en.bin <wav>` —
-produces the correct transcript. Real-mic spoken transcription still needs a
-manual test on hardware (headless CI can't feed a mic).
+produces the correct transcript. Live mic confirmed on a C920 webcam
+(`--device "C920"` selects a specific input device by name).
 
 Remaining: echo/stub impl for offline testing; threading/backoff not yet needed
 at this stage.
