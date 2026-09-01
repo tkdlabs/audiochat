@@ -113,6 +113,13 @@ total). All options have `AUDIOCHAT_*` env-var fallbacks (`AUDIOCHAT_DEVICE`,
 `AUDIOCHAT_LLM_URL`); flags take precedence. `--s2s` handles Ctrl-C gracefully,
 flushing the pending utterance before exit.
 
+Markdown in LLM replies is stripped to plain text before synthesis, so Piper
+doesn't read out `###`, `*`, backticks, etc.
+
+If the app fires turns on brief pauses, raise the silence window with
+`--vad-silence 1500` (default 1200 ms). If it doesn't detect the end of speech,
+raise `--vad-threshold` (e.g. `0.04`).
+
 ## Status
 
 - [x] M0 — Workspace scaffold + CI

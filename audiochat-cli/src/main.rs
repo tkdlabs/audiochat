@@ -26,7 +26,7 @@ Options:
   --llm-model NAME    Ollama model name for --prompt/--s2s.
   --llm-url URL       Ollama base URL (default: http://localhost:11434).
   --vad-threshold F   VAD RMS threshold (0..1); raise if pauses aren't detected.
-  --vad-silence MS    Trailing silence (ms) that ends an utterance (default 600).
+  --vad-silence MS    Trailing silence (ms) that ends an utterance (default 1200).
   -v, --verbose       Print per-turn latency metrics in --s2s.
   --silent            In --s2s, print replies but do not speak them.
   -h, --help          Show this help.

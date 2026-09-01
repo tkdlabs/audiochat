@@ -102,7 +102,7 @@ impl Pipeline {
             speak_replies: true,
             verbose: false,
             vad_threshold: 0.02,
-            vad_max_silence_ms: 600,
+            vad_max_silence_ms: 1200,
         }
     }
 
@@ -205,8 +205,15 @@ impl Pipeline {
         if text.is_empty() {
             return Ok(());
         }
+        // LLM replies are often Markdown; Piper would read the markup symbols
+        // aloud, so speak a plain-text version (the terminal keeps the original).
+        let plain = crate::markdown::strip_markdown(text);
+        let plain = plain.trim();
+        if plain.is_empty() {
+            return Ok(());
+        }
         self.ensure_sink()?;
-        let pcm = with_retry("tts synthesize", 2, 200, || self.tts.synthesize(text))?;
+        let pcm = with_retry("tts synthesize", 2, 200, || self.tts.synthesize(plain))?;
         if self.speak_replies && !pcm.is_empty() {
             if let Some(sink) = &self.sink {
                 sink.push(pcm);
