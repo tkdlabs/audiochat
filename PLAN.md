@@ -90,10 +90,21 @@ mode streams the reply token-by-token. Tested with `gemma4:e2b` on localhost.
 
 Remaining: OpenAI-compatible backend (trivial swap); conversation context/multi-turn.
 
-### M4 — Integration: end-to-end speech-to-speech
+### M4 — Integration: end-to-end speech-to-speech  ✅
 - Wire M1+M2+M3 through the pipeline
 - Streaming TTS: feed LLM token stream into Piper for low-latency audio
 - First manual end-to-end run: "what's 2+2?" → heard spoken answer
+
+Status: `Pipeline` orchestrator in core; a background `AudioSink` thread plays
+each completed sentence (queued in order, so playback never blocks the LLM
+token stream). Tokens print to the console in real time; sentence boundaries
+(`.`/`!`/`?`) trigger synthesis + queued playback. CLI `--s2s` mode (
+`--tts-model`, `--llm-model`, optional `--silent`). STT/TTS/LLM constructed from
+the same backends as M1-M3.
+
+Remaining: true token-by-token streaming TTS (piper reads all stdin to EOF, so
+sentence-chunked synthesis is the current design); mic-audio validation of the
+s2s loop on real hardware.
 
 ### M5 — Hardening & measurement
 - Latency instrumentation per stage (capture→VAD→STT→LLM→first-audio)

@@ -83,11 +83,26 @@ ollama pull gemma4:e2b   # or any installed model
 cargo run -p audiochat-cli -- --prompt "What is 2+2?" --llm-model gemma4:e2b
 ```
 
+## Speech-to-speech (end to end)
+
+`--s2s` drives the full loop: mic -> VAD -> STT -> LLM -> Piper -> speaker.
+LLM tokens stream to the console in real time while each completed sentence is
+synthesized and played on a background thread (sequential, non-blocking).
+
+```
+PIPER_BIN=$PWD/.venv/bin/piper cargo run -p audiochat-cli -- --s2s \
+  models/ggml-tiny.en.bin \
+  --tts-model models/voices/en_US-lessac-medium.onnx \
+  --llm-model gemma4:e2b
+```
+
+Add `--silent` to print replies without speaking them.
+
 ## Status
 
 - [x] M0 — Workspace scaffold + CI
 - [x] M1 — Mic → text (capture + VAD + STT)
 - [x] M2 — Text → audio (TTS + playback)
 - [x] M3 — Text → text (LLM client)
-- [ ] M4 — End-to-end speech-to-speech
+- [x] M4 — End-to-end speech-to-speech
 - [ ] M5 — Hardening & latency measurement

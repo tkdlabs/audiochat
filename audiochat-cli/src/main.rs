@@ -1,9 +1,10 @@
-//! audiochat CLI: speech-to-text (default), TTS test (`--speak`), or LLM test (`--prompt`).
+//! audiochat CLI: speech-to-text (default), TTS test (`--speak`), LLM test
+//! (`--prompt`), or full speech-to-speech (`--s2s`).
 
 use std::path::PathBuf;
 
 use audiochat_core::{
-    play_pcm, AudioConfig, EnergyVad, Llm, MicCapture, SpeechRecognizer, TextToSpeech,
+    play_pcm, AudioConfig, EnergyVad, Llm, MicCapture, Pipeline, SpeechRecognizer, TextToSpeech,
 };
 use audiochat_llm::Ollama;
 use audiochat_stt_whisper::WhisperRecognizer;
@@ -16,13 +17,15 @@ Modes:
   (default)   Live mic -> text using the whisper model.
   --speak T   Synthesize T with Piper and play it (requires --tts-model).
   --prompt T  Send T to an LLM (Ollama) and print the streamed reply.
+  --s2s       Full speech-to-speech loop: mic -> STT -> LLM -> Piper.
 
 Options:
   -d, --device NAME   Match an input device by name (case-insensitive substring).
-  --tts-model PATH    Piper ONNX voice model for --speak mode.
+  --tts-model PATH    Piper ONNX voice model for --speak/--s2s.
   --tts-bin PATH      Piper executable (default: $PIPER_BIN or \"piper\").
-  --llm-model NAME    Ollama model name for --prompt mode.
+  --llm-model NAME    Ollama model name for --prompt/--s2s.
   --llm-url URL       Ollama base URL (default: http://localhost:11434).
+  --silent            In --s2s, print replies but do not speak them.
   -h, --help          Show this help.";
 
 struct Opts {
@@ -34,6 +37,8 @@ struct Opts {
     prompt: Option<String>,
     llm_model: Option<String>,
     llm_url: Option<String>,
+    s2s: bool,
+    silent: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<Opts, String> {
@@ -45,6 +50,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut prompt: Option<String> = None;
     let mut llm_model: Option<String> = None;
     let mut llm_url: Option<String> = None;
+    let mut s2s = false;
+    let mut silent = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -53,6 +60,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 let name = args.get(i).ok_or("--device requires a value")?;
                 device = Some(name.clone());
             }
+            "--s2s" => s2s = true,
+            "--silent" => silent = true,
             "--speak" => {
                 i += 1;
                 let text = args.get(i).ok_or("--speak requires text")?;
@@ -101,6 +110,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         prompt,
         llm_model,
         llm_url,
+        s2s,
+        silent,
     })
 }
 
@@ -178,10 +189,56 @@ fn run_stt(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     Ok(())
 }
 
+fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let model = opts
+        .model
+        .as_ref()
+        .ok_or_else(|| Box::<dyn std::error::Error + Send + Sync>::from(USAGE.to_string()))?;
+    let tts_model = opts
+        .tts_model
+        .as_ref()
+        .ok_or("--s2s requires --tts-model <piper.onnx>")?;
+    let llm_model = opts
+        .llm_model
+        .clone()
+        .ok_or("--s2s requires --llm-model <ollama-model>")?;
+    let llm_url = opts
+        .llm_url
+        .clone()
+        .unwrap_or_else(|| "http://localhost:11434".to_string());
+    let tts_bin = opts
+        .tts_bin
+        .clone()
+        .or_else(|| std::env::var("PIPER_BIN").ok())
+        .unwrap_or_else(|| "piper".to_string());
+
+    let stt = Box::new(WhisperRecognizer::new(model)?);
+    let llm = Box::new(Ollama::with_base(llm_url, llm_model));
+    let tts = Box::new(Piper::with_bin(tts_bin, tts_model)?);
+
+    let mut pipeline = Pipeline::new(stt, llm, tts);
+    pipeline.speak_replies = !opts.silent;
+    let mic = MicCapture::start_with_device(AudioConfig::default(), opts.device.as_deref())?;
+
+    println!("audiochat: speech-to-speech mode. Speak to ask; Ctrl-C to stop.");
+    while let Ok(pcm) = mic.rx.recv() {
+        pipeline.feed(&pcm)?;
+    }
+    pipeline.flush()?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return Ok(());
+    }
     let opts = parse_args(&args).map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
 
+    if opts.s2s {
+        return run_s2s(&opts);
+    }
     if opts.prompt.is_some() {
         return run_llm(&opts);
     }
