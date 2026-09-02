@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crate::audio_sink::AudioSink;
 use crate::config::AudioConfig;
-use crate::traits::{Llm, SpeechRecognizer, TextToSpeech};
+use crate::traits::{Llm, TextToSpeech};
 
 /// Sentence-ending punctuation used to chunk streamed LLM tokens for TTS.
 fn is_sentence_boundary(segment: &str) -> bool {
@@ -69,9 +69,9 @@ impl TurnTiming {
     }
 }
 
-/// Orchestrates STT -> LLM -> TTS -> playback for one spoken turn.
+/// Orchestrates LLM -> TTS -> playback for one spoken turn. STT runs on a
+/// background thread and its result is handed to [`Pipeline::respond`].
 pub struct Pipeline {
-    stt: Box<dyn SpeechRecognizer>,
     pub llm: Box<dyn Llm>,
     tts: Box<dyn TextToSpeech>,
     cfg: AudioConfig,
@@ -86,13 +86,8 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn new(
-        stt: Box<dyn SpeechRecognizer>,
-        llm: Box<dyn Llm>,
-        tts: Box<dyn TextToSpeech>,
-    ) -> Self {
+    pub fn new(llm: Box<dyn Llm>, tts: Box<dyn TextToSpeech>) -> Self {
         Self {
-            stt,
             llm,
             tts,
             cfg: AudioConfig::default(),
@@ -116,22 +111,25 @@ impl Pipeline {
         }
     }
 
-    /// Process one captured utterance: STT -> LLM -> TTS -> playback.
+    /// Respond to a transcribed question: LLM -> TTS -> playback.
     ///
     /// The playback gate is engaged only while audio is being emitted, so a
     /// background capture thread can keep recording during LLM latency. The
     /// method blocks until the spoken reply has finished playing. `completed_at`
-    /// is the instant end-of-speech was detected, used as the latency origin.
-    pub fn prompt(
+    /// is the instant end-of-speech was detected (the latency origin) and
+    /// `stt_ms` is the transcription latency measured on the STT thread.
+    pub fn respond(
         &mut self,
-        utterance: &[i16],
+        question: &str,
         completed_at: Instant,
+        stt_ms: u64,
     ) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
         let start = completed_at;
-        let mut timing = TurnTiming::default();
+        let mut timing = TurnTiming {
+            stt_ms,
+            ..Default::default()
+        };
 
-        let question = self.stt.transcribe(utterance)?;
-        timing.stt_ms = start.elapsed().as_millis() as u64;
         if question.trim().is_empty() {
             return Ok(None);
         }
@@ -140,7 +138,7 @@ impl Pipeline {
         println!("ai:   ",);
         // Gate is FALSE here, so a background capture thread still records the
         // user's speech during the (potentially long) LLM latency ahead.
-        let mut resp = with_retry("llm generate", 3, 300, || self.llm.generate(&question))?;
+        let mut resp = with_retry("llm generate", 3, 300, || self.llm.generate(question))?;
         let mut reply = String::new();
         let mut segment = String::new();
         let mut saw_first_token = false;

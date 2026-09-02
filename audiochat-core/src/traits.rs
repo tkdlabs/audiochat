@@ -9,7 +9,8 @@ pub type LlmStreamItem = Result<String, Box<dyn Error + Send + Sync>>;
 pub type LlmStream = Box<dyn Iterator<Item = LlmStreamItem> + Send>;
 
 /// A speech-to-text engine. Implementations are pluggable (e.g. whisper.cpp).
-pub trait SpeechRecognizer {
+/// Must be `Send` so it can be moved onto a background transcription thread.
+pub trait SpeechRecognizer: Send {
     /// Transcribe a complete audio utterance (PCM 16 kHz mono) to text.
     fn transcribe(&mut self, pcm: &[i16]) -> Result<String, Box<dyn Error + Send + Sync>>;
 }

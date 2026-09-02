@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::capture::MicCapture;
 use crate::pipeline::Pipeline;
+use crate::traits::SpeechRecognizer;
 use crate::vad::EnergyVad;
 use crate::DEFAULT_SAMPLE_RATE;
 
@@ -40,6 +41,13 @@ struct CaptureCtrl {
 struct Utterance {
     pcm: Vec<i16>,
     completed_at: Instant,
+}
+
+/// A transcribed utterance ready for the LLM, plus its timing provenance.
+struct SttResult {
+    question: String,
+    completed_at: Instant,
+    stt_ms: u64,
 }
 
 /// Runs the capture thread for the lifetime of `mic`, sending each completed
@@ -146,6 +154,48 @@ fn capture_loop(
     }
 }
 
+/// Runs the STT worker for the lifetime of the session, transcribing each
+/// captured utterance and pushing the result to `result_tx`. This runs on its
+/// own thread so the next utterance's transcription overlaps the LLM/TTS work
+/// the main thread is doing for the current turn.
+fn stt_loop(
+    mut recognizer: Box<dyn SpeechRecognizer>,
+    utt_rx: mpsc::Receiver<Utterance>,
+    result_tx: mpsc::SyncSender<SttResult>,
+    stop: Arc<AtomicBool>,
+    verbose: bool,
+) {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let utterance = match utt_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(u) => u,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        match recognizer.transcribe(&utterance.pcm) {
+            Ok(question) => {
+                if question.trim().is_empty() {
+                    continue;
+                }
+                let stt_ms = utterance.completed_at.elapsed().as_millis() as u64;
+                if verbose {
+                    log("stt", &format!("transcribed ({stt_ms} ms): {question}"));
+                }
+                let _ = result_tx.try_send(SttResult {
+                    question,
+                    completed_at: utterance.completed_at,
+                    stt_ms,
+                });
+            }
+            Err(e) => {
+                eprintln!("audiochat: STT failed: {e}");
+            }
+        }
+    }
+}
+
 fn state_label(listening: bool) -> &'static str {
     if listening {
         "talk"
@@ -153,7 +203,6 @@ fn state_label(listening: bool) -> &'static str {
         "muted"
     }
 }
-
 fn log(state: &str, msg: &str) {
     eprintln!("[{state}] {msg}");
 }
@@ -204,31 +253,43 @@ impl Session {
 
     /// Run the speech-to-speech session to completion.
     ///
-    /// `mic` is moved into a background capture thread; `pipeline` is moved
-    /// onto the main thread and processes turns one at a time. If `stop` is
+    /// `mic` is moved into a background capture thread; `stt` is moved into a
+    /// background transcription thread; `pipeline` (LLM + TTS) runs on the main
+    /// thread and processes transcribed turns one at a time. Captured utterances
+    /// are transcribed in parallel with the current turn's LLM/TTS work, so a
+    /// queued turn is ready by the time the main loop reaches it. If `stop` is
     /// provided, the loop polls it and returns cleanly when it becomes `true`
     /// (e.g. on Ctrl-C).
     pub fn run(
         self,
         mic: MicCapture,
+        stt: Box<dyn SpeechRecognizer>,
         mut pipeline: Pipeline,
         stop: Option<Arc<AtomicBool>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let gate = Arc::new(AtomicBool::new(false));
         pipeline = pipeline.with_gate(Some(Arc::clone(&gate)));
 
+        let stop_flag = stop.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+
         let (utt_tx, utt_rx) = mpsc::sync_channel::<Utterance>(16);
+        let (result_tx, result_rx) = mpsc::sync_channel::<SttResult>(8);
+
         let vad = EnergyVad::new(DEFAULT_SAMPLE_RATE)
             .with_threshold(self.vad_threshold)
             .with_max_silence(self.vad_max_silence_ms);
-        let stop_flag = stop.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         let ctrl = CaptureCtrl {
             gate,
             stop: Arc::clone(&stop_flag),
         };
         let verbose = self.verbose;
-        let handle = std::thread::spawn(move || {
+
+        let capture_handle = std::thread::spawn(move || {
             capture_loop(vad, ctrl, mic, utt_tx, verbose);
+        });
+        let stt_stop = Arc::clone(&stop_flag);
+        let stt_handle = std::thread::spawn(move || {
+            stt_loop(stt, utt_rx, result_tx, stt_stop, verbose);
         });
 
         if verbose {
@@ -239,15 +300,18 @@ impl Session {
             if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
-            match utt_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(utterance) => {
-                    pipeline.prompt(&utterance.pcm, utterance.completed_at)?;
+            match result_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(result) => {
+                    pipeline.respond(&result.question, result.completed_at, result.stt_ms)?;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
-        handle.join().map_err(|_| "capture thread panicked")?;
+        stt_handle.join().map_err(|_| "STT thread panicked")?;
+        capture_handle
+            .join()
+            .map_err(|_| "capture thread panicked")?;
         Ok(())
     }
 }

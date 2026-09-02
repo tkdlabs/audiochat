@@ -276,7 +276,7 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     let llm = Box::new(build_llm(opts));
     let tts = Box::new(Piper::with_bin(tts_bin, tts_model)?);
 
-    let mut pipeline = Pipeline::new(stt, llm, tts);
+    let mut pipeline = Pipeline::new(llm, tts);
     pipeline.speak_replies = !opts.silent;
     pipeline.verbose = opts.verbose;
     let mic = MicCapture::start_with_device(AudioConfig::default(), opts.device.as_deref())?;
@@ -298,7 +298,7 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     .map_err(|e| format!("failed to install signal handler: {e}"))?;
 
     println!("audiochat: speech-to-speech mode. Speak to ask; Ctrl-C to stop.");
-    session.run(mic, pipeline, Some(stop))?;
+    session.run(mic, stt, pipeline, Some(stop))?;
     println!("\naudiochat: stopped.");
     Ok(())
 }
