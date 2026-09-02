@@ -26,7 +26,7 @@ Modes:
 Options:
   -d, --device NAME   Match an input device by name (case-insensitive substring).
   --tts-model PATH    Piper ONNX voice model for --speak/--s2s.
-  --tts-bin PATH      Piper executable (default: $PIPER_BIN or \"piper\").
+  --tts-python PATH   Python interpreter with piper-tts installed (default: python3).
   --llm-model NAME    Ollama model name for --prompt/--s2s.
   --llm-url URL       Ollama base URL (default: http://localhost:11434).
   --system-prompt P   Override the default assistant system prompt (spoken style).
@@ -39,7 +39,7 @@ Options:
 Environment (flag takes precedence):
   AUDIOCHAT_DEVICE     input device substring
   AUDIOCHAT_TTS_MODEL  piper voice path
-  AUDIOCHAT_TTS_BIN    piper executable (falls back to PIPER_BIN)
+  AUDIOCHAT_PYTHON     python interpreter for piper (default python3)
   AUDIOCHAT_LLM_MODEL  ollama model name
   AUDIOCHAT_LLM_URL    ollama base URL";
 
@@ -48,7 +48,7 @@ struct Opts {
     device: Option<String>,
     speak: Option<String>,
     tts_model: Option<PathBuf>,
-    tts_bin: Option<String>,
+    tts_python: Option<String>,
     prompt: Option<String>,
     llm_model: Option<String>,
     llm_url: Option<String>,
@@ -70,7 +70,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut device: Option<String> = None;
     let mut speak: Option<String> = None;
     let mut tts_model: Option<PathBuf> = None;
-    let mut tts_bin: Option<String> = None;
+    let mut tts_python: Option<String> = None;
     let mut prompt: Option<String> = None;
     let mut llm_model: Option<String> = None;
     let mut llm_url: Option<String> = None;
@@ -116,10 +116,10 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 let p = args.get(i).ok_or("--tts-model requires a path")?;
                 tts_model = Some(PathBuf::from(p));
             }
-            "--tts-bin" => {
+            "--tts-python" => {
                 i += 1;
-                let p = args.get(i).ok_or("--tts-bin requires a path")?;
-                tts_bin = Some(p.clone());
+                let p = args.get(i).ok_or("--tts-python requires a path")?;
+                tts_python = Some(p.clone());
             }
             "--vad-threshold" => {
                 i += 1;
@@ -156,7 +156,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         speak,
         tts_model: tts_model
             .or_else(|| std::env::var("AUDIOCHAT_TTS_MODEL").ok().map(PathBuf::from)),
-        tts_bin: opt_or_env(tts_bin, "AUDIOCHAT_TTS_BIN"),
+        tts_python: opt_or_env(tts_python, "AUDIOCHAT_PYTHON"),
         prompt,
         llm_model: opt_or_env(llm_model, "AUDIOCHAT_LLM_MODEL"),
         llm_url: opt_or_env(llm_url, "AUDIOCHAT_LLM_URL"),
@@ -211,12 +211,11 @@ fn run_tts(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         .tts_model
         .as_ref()
         .ok_or("--speak requires --tts-model <piper.onnx>")?;
-    let bin = opts
-        .tts_bin
+    let python = opts
+        .tts_python
         .clone()
-        .or_else(|| std::env::var("PIPER_BIN").ok())
-        .unwrap_or_else(|| "piper".to_string());
-    let mut piper = Piper::with_bin(bin, tts_model)?;
+        .unwrap_or_else(|| "python3".to_string());
+    let mut piper = Piper::with_python(python, tts_model)?;
     let text = opts.speak.as_deref().unwrap_or_default();
     let pcm = piper.synthesize(text)?;
     eprintln!(
@@ -266,15 +265,14 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     if opts.llm_model.is_none() {
         return Err("--s2s requires --llm-model <ollama-model>".into());
     }
-    let tts_bin = opts
-        .tts_bin
+    let tts_python = opts
+        .tts_python
         .clone()
-        .or_else(|| std::env::var("PIPER_BIN").ok())
-        .unwrap_or_else(|| "piper".to_string());
+        .unwrap_or_else(|| "python3".to_string());
 
     let stt = Box::new(WhisperRecognizer::new(model)?);
     let llm = Box::new(build_llm(opts));
-    let tts = Box::new(Piper::with_bin(tts_bin, tts_model)?);
+    let tts = Box::new(Piper::with_python(tts_python, tts_model)?);
 
     let mut pipeline = Pipeline::new(llm, tts);
     pipeline.speak_replies = !opts.silent;

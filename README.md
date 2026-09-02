@@ -52,7 +52,9 @@ cargo run -p audiochat-cli -- --device "C920" models/ggml-tiny.en.bin
 
 ## TTS (Piper)
 
-Piper runs as a subprocess (`audiochat-tts-piper` wraps the `piper` CLI).
+Piper runs as a persistent subprocess: `audiochat-tts-piper` drives a small
+Python helper (via `piper-tts`) that keeps the voice model loaded and streams
+raw PCM back, so the model isn't re-loaded per sentence.
 
 ```
 # 1. Install piper + a voice model (models/ is gitignored):
@@ -62,12 +64,12 @@ curl -L -o models/voices/en_US-lessac-medium.onnx \
   https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
 
 # 2. Speak text aloud:
-PIPER_BIN=$PWD/.venv/bin/piper \
+AUDIOCHAT_PYTHON=$PWD/.venv/bin/python \
   cargo run -p audiochat-cli -- --speak "Hello world" \
   --tts-model models/voices/en_US-lessac-medium.onnx
 
 # 3. Offline TTS -> WAV (no playback):
-PIPER_BIN=$PWD/.venv/bin/piper \
+AUDIOCHAT_PYTHON=$PWD/.venv/bin/python \
   cargo run -p audiochat-tts-piper --example tts -- \
   models/voices/en_US-lessac-medium.onnx "Text to a wav file."
 ```
@@ -102,7 +104,7 @@ queue) rather than opening the device per chunk, which avoids ALSA "I/O error"
 churn from rapid open/close cycles.
 
 ```
-PIPER_BIN=$PWD/.venv/bin/piper cargo run -p audiochat-cli -- --s2s \
+AUDIOCHAT_PYTHON=$PWD/.venv/bin/python cargo run -p audiochat-cli -- --s2s \
   models/ggml-tiny.en.bin \
   --tts-model models/voices/en_US-lessac-medium.onnx \
   --llm-model gemma4:e2b
@@ -114,7 +116,7 @@ total) plus live capture diagnostics on stderr: when the app is listening vs.
 muted, when it catches speech, when it dispatches an utterance to STT, and when
 it drops a too-short utterance — useful for tuning `--vad-threshold` and
 `--vad-silence` if you're being cut off. All options have `AUDIOCHAT_*` env-var fallbacks (`AUDIOCHAT_DEVICE`,
-`AUDIOCHAT_TTS_MODEL`, `AUDIOCHAT_TTS_BIN`, `AUDIOCHAT_LLM_MODEL`,
+`AUDIOCHAT_TTS_MODEL`, `AUDIOCHAT_PYTHON`, `AUDIOCHAT_LLM_MODEL`,
 `AUDIOCHAT_LLM_URL`); flags take precedence. `--s2s` handles Ctrl-C gracefully,
 shutting down the capture thread and stopping playback before exit.
 

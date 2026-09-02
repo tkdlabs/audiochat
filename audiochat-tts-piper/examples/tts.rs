@@ -3,7 +3,7 @@
 //! Usage:
 //!   cargo run -p audiochat-tts-piper --example tts -- <piper-model.onnx> "some text"
 //! Environment:
-//!   PIPER_BIN  path to the piper executable (default: "piper")
+//!   AUDIOCHAT_PYTHON  python interpreter with piper-tts (default: "python3")
 
 use std::error::Error;
 
@@ -19,8 +19,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let model = &args[1];
     let text = args[2..].join(" ");
 
-    let bin = std::env::var("PIPER_BIN").unwrap_or_else(|_| "piper".to_string());
-    let mut piper = Piper::with_bin(bin, model)?;
+    let python = std::env::var("AUDIOCHAT_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let mut piper = Piper::with_python(python, model)?;
 
     let pcm = piper.synthesize(&text)?;
     eprintln!(

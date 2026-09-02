@@ -71,14 +71,14 @@ at this stage.
 - Trait: `TextToSpeech`
 - Manual test: feed some text, hear it spoken
 
-Status: `audiochat-tts-piper` (subprocess wrapper around the `piper` CLI; feeds
-text via stdin, reads raw 22.05 kHz PCM, resamples to 16 kHz mono); `play_pcm`
-playback in core; CLI `--speak "<text>" --tts-model <voice.onnx>` mode. Tested
-with `en_US-lessac-medium` voice (played aloud and to a WAV). Piper runs from a
-Python venv via `PIPER_BIN` env var.
+Status: `audiochat-tts-piper` (persistent subprocess wrapping the `piper` Python
+library via an embedded helper; feeds length-prefixed text via stdin, reads raw
+22.05 kHz PCM, resamples to 16 kHz mono); `play_pcm`/`AudioSink` playback in
+core; CLI `--speak "<text>" --tts-model <voice.onnx>` mode. Tested with
+`en_US-lessac-medium` voice (played aloud and to a WAV). Piper runs from a
+Python venv via the `AUDIOCHAT_PYTHON` env var (default `python3`).
 
-Remaining: keep the piper process alive for streaming TTS (M4), espeak/system
-fallback backend.
+Remaining: espeak/system fallback backend.
 
 ### M3 — LLM path: text → text (no audio)  ✅
 - Pluggable `Llm` trait; Ollama backend + OpenAI-compatible backend
