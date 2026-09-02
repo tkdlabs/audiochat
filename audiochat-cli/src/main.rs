@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use audiochat_core::{
-    play_pcm, AudioConfig, EnergyVad, Llm, MicCapture, Pipeline, Session, SpeechRecognizer,
+    AudioConfig, AudioSink, EnergyVad, Llm, MicCapture, Pipeline, Session, SpeechRecognizer,
     TextToSpeech,
 };
 use audiochat_llm::Ollama;
@@ -224,7 +224,9 @@ fn run_tts(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         pcm.len(),
         pcm.len() * 1000 / 16_000
     );
-    play_pcm(&pcm, AudioConfig::default())?;
+    let sink = AudioSink::new(AudioConfig::default())?;
+    sink.push(pcm);
+    sink.drain();
     Ok(())
 }
 

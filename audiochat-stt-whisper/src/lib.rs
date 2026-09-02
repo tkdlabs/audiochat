@@ -7,6 +7,10 @@ use std::path::Path;
 use audiochat_core::SpeechRecognizer;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+/// Segments with a no-speech probability above this threshold are treated as
+/// background noise and rejected (matching whisper.cpp's default threshold).
+const NO_SPEECH_THRESHOLD: f32 = 0.6;
+
 /// A speech recognizer backed by whisper.cpp (via whisper-rs).
 pub struct WhisperRecognizer {
     ctx: WhisperContext,
@@ -62,19 +66,29 @@ impl SpeechRecognizer for WhisperRecognizer {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_single_segment(false);
+        params.set_no_context(true);
+        params.set_suppress_blank(true);
 
         state
             .full(params, &samples)
             .map_err(|e| Box::<dyn Error + Send + Sync>::from(WhisperError(format!("{e}"))))?;
 
         let mut out = String::new();
+        let mut max_no_speech = 0.0f32;
         let num_segments = state.full_n_segments();
         for i in 0..num_segments {
             if let Some(seg) = state.get_segment(i) {
+                max_no_speech = max_no_speech.max(seg.no_speech_probability());
                 out.push_str(&seg.to_string());
             }
         }
 
-        Ok(out.trim().to_string())
+        let text = out.trim().to_string();
+        // Whisper confidently flags pure noise/background sound as non-speech;
+        // reject it rather than letting it become a spurious turn.
+        if text.is_empty() || max_no_speech > NO_SPEECH_THRESHOLD {
+            return Ok(String::new());
+        }
+        Ok(text)
     }
 }

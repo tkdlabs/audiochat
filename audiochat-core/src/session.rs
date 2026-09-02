@@ -31,6 +31,15 @@ const POST_PLAYBACK_COOLDOWN_MS: u64 = 250;
 struct CaptureCtrl {
     /// True while the assistant is speaking (playback active).
     gate: Arc<AtomicBool>,
+    /// Set to true to ask the capture thread to stop (e.g. on Ctrl-C).
+    stop: Arc<AtomicBool>,
+}
+
+/// A completed utterance plus the instant the VAD detected end of speech, so
+/// the pipeline can measure latency against the true end of the user's turn.
+struct Utterance {
+    pcm: Vec<i16>,
+    completed_at: Instant,
 }
 
 /// Runs the capture thread for the lifetime of `mic`, sending each completed
@@ -39,7 +48,7 @@ fn capture_loop(
     vad: EnergyVad,
     ctrl: CaptureCtrl,
     mic: MicCapture,
-    utt_tx: mpsc::Sender<Vec<i16>>,
+    utt_tx: mpsc::SyncSender<Utterance>,
     verbose: bool,
 ) {
     let mut vad = vad;
@@ -48,7 +57,16 @@ fn capture_loop(
     let mut prev_speech = false;
     let mut cooldown_until = Instant::now() - Duration::from_secs(1);
 
-    while let Ok(pcm) = mic.rx.recv() {
+    loop {
+        if ctrl.stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let pcm = match mic.rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(pcm) => pcm,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
         let gate = ctrl.gate.load(Ordering::Acquire);
 
         if gate != prev_gate {
@@ -96,7 +114,10 @@ fn capture_loop(
                         &format!("dispatched utterance ({ms} ms) -> STT"),
                     );
                 }
-                let _ = utt_tx.send(utterance);
+                let _ = utt_tx.send(Utterance {
+                    pcm: utterance,
+                    completed_at: Instant::now(),
+                });
             } else if verbose {
                 log(
                     state_label(listening),
@@ -117,7 +138,10 @@ fn capture_loop(
 
     if let Some(utt) = vad.flush() {
         if utt.len() >= MIN_UTTERANCE_SAMPLES {
-            let _ = utt_tx.send(utt);
+            let _ = utt_tx.send(Utterance {
+                pcm: utt,
+                completed_at: Instant::now(),
+            });
         }
     }
 }
@@ -193,11 +217,15 @@ impl Session {
         let gate = Arc::new(AtomicBool::new(false));
         pipeline = pipeline.with_gate(Some(Arc::clone(&gate)));
 
-        let (utt_tx, utt_rx) = mpsc::channel::<Vec<i16>>();
+        let (utt_tx, utt_rx) = mpsc::sync_channel::<Utterance>(16);
         let vad = EnergyVad::new(DEFAULT_SAMPLE_RATE)
             .with_threshold(self.vad_threshold)
             .with_max_silence(self.vad_max_silence_ms);
-        let ctrl = CaptureCtrl { gate };
+        let stop_flag = stop.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let ctrl = CaptureCtrl {
+            gate,
+            stop: Arc::clone(&stop_flag),
+        };
         let verbose = self.verbose;
         let handle = std::thread::spawn(move || {
             capture_loop(vad, ctrl, mic, utt_tx, verbose);
@@ -208,14 +236,12 @@ impl Session {
         }
 
         loop {
-            if let Some(s) = &stop {
-                if s.load(Ordering::Relaxed) {
-                    break;
-                }
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
             }
             match utt_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(utterance) => {
-                    pipeline.prompt(&utterance)?;
+                    pipeline.prompt(&utterance.pcm, utterance.completed_at)?;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,

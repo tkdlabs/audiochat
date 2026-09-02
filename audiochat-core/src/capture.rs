@@ -63,7 +63,7 @@ fn select_input_device(
 /// channel. Only the resampler is mutated.
 struct SharedOutput {
     resampler: Mutex<LinearResampler>,
-    tx: mpsc::Sender<Vec<i16>>,
+    tx: mpsc::SyncSender<Vec<i16>>,
 }
 
 impl SharedOutput {
@@ -75,7 +75,9 @@ impl SharedOutput {
             .into_iter()
             .map(|v| (v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
             .collect();
-        let _ = self.tx.send(pcm);
+        // `try_send` never blocks the real-time audio callback; if the bounded
+        // channel is full we drop the frame rather than stall the stream.
+        let _ = self.tx.try_send(pcm);
     }
 }
 
@@ -108,7 +110,7 @@ impl MicCapture {
         let config: cpal::StreamConfig = supported.into();
         eprintln!("audiochat: using input device '{device_desc}' ({native_rate} Hz, {native_channels} ch)");
 
-        let (tx, rx) = mpsc::channel::<Vec<i16>>();
+        let (tx, rx) = mpsc::sync_channel::<Vec<i16>>(64);
         let shared = Arc::new(SharedOutput {
             resampler: Mutex::new(LinearResampler::new(native_rate, cfg.sample_rate)),
             tx,

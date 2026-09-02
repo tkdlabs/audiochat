@@ -1,5 +1,7 @@
 //! Voice activity detection: segments raw PCM into speech utterances.
 
+use std::collections::VecDeque;
+
 /// Simple energy-based voice activity detector.
 ///
 /// Works on 16 kHz mono `i16` PCM. Segments continuous speech into utterances
@@ -25,6 +27,11 @@ pub struct EnergyVad {
     last_frame_speech: bool,
     /// Cumulative samples of speech seen so far in the current utterance.
     speech_samples: usize,
+    /// Rolling buffer of recent silence, prepended to each utterance so the
+    /// first phoneme isn't clipped by frame quantization.
+    pre_roll: VecDeque<i16>,
+    /// Maximum pre-roll length in samples.
+    pre_roll_len: usize,
 }
 
 impl EnergyVad {
@@ -41,6 +48,8 @@ impl EnergyVad {
             armed: false,
             last_frame_speech: false,
             speech_samples: 0,
+            pre_roll: VecDeque::new(),
+            pre_roll_len: (sample_rate as usize * 200) / 1000, // 200 ms
         }
     }
 
@@ -56,6 +65,12 @@ impl EnergyVad {
         self
     }
 
+    /// Configure how much leading silence (ms) is prepended to each utterance.
+    pub fn with_pre_roll_ms(mut self, ms: u64) -> Self {
+        self.pre_roll_len = self.frame_len * ms as usize / self.frame_ms as usize;
+        self
+    }
+
     /// Feed a block of PCM, returning any completed utterances.
     pub fn feed(&mut self, pcm: &[i16]) -> Vec<Vec<i16>> {
         self.leftover.extend_from_slice(pcm);
@@ -67,19 +82,32 @@ impl EnergyVad {
             self.last_frame_speech = speech;
 
             if speech {
-                self.armed = true;
+                if !self.armed {
+                    // Speech onset: prepend the captured pre-speech audio so the
+                    // first phoneme isn't clipped by frame quantization.
+                    self.armed = true;
+                    self.utterance.extend(self.pre_roll.iter().copied());
+                }
+                self.pre_roll.clear();
                 self.silence_frames = 0;
                 self.speech_samples += frame.len();
                 self.utterance.extend_from_slice(&frame);
-            } else if self.armed {
-                self.silence_frames += 1;
-                if self.silence_frames * self.frame_ms >= self.max_silence_ms {
-                    completed.push(std::mem::take(&mut self.utterance));
-                    self.armed = false;
-                    self.speech_samples = 0;
-                    self.silence_frames = 0;
-                } else {
-                    self.utterance.extend_from_slice(&frame);
+            } else {
+                self.pre_roll.extend(frame.iter().copied());
+                let excess = self.pre_roll.len().saturating_sub(self.pre_roll_len);
+                if excess > 0 {
+                    self.pre_roll.drain(..excess);
+                }
+                if self.armed {
+                    self.silence_frames += 1;
+                    if self.silence_frames * self.frame_ms >= self.max_silence_ms {
+                        completed.push(std::mem::take(&mut self.utterance));
+                        self.armed = false;
+                        self.speech_samples = 0;
+                        self.silence_frames = 0;
+                    } else {
+                        self.utterance.extend_from_slice(&frame);
+                    }
                 }
             }
         }
@@ -108,6 +136,7 @@ impl EnergyVad {
         self.silence_frames = 0;
         self.speech_samples = 0;
         self.leftover.clear();
+        self.pre_roll.clear();
         out
     }
 }
@@ -162,5 +191,16 @@ mod tests {
         let out = vad.flush();
         assert!(out.is_some());
         assert!(!out.unwrap().is_empty());
+    }
+
+    #[test]
+    fn prepends_pre_roll_before_speech() {
+        let mut vad = EnergyVad::new(16_000);
+        let frame = 480; // 30 ms
+        vad.feed(&silence(frame)); // 1 silent frame -> pre-roll
+        vad.feed(&speech(frame)); // onset: prepends the silent pre-roll
+        let utt = vad.flush().unwrap();
+        assert_eq!(utt.len(), frame * 2);
+        assert!(utt[..frame].iter().all(|&s| s == 0));
     }
 }

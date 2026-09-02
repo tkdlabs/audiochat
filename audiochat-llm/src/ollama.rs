@@ -35,6 +35,15 @@ impl ChatMessage {
     }
 }
 
+/// Trim the oldest messages so at most `max_turns` user+assistant pairs remain.
+fn trim_messages(messages: &mut Vec<ChatMessage>, max_turns: usize) {
+    let max_msgs = max_turns * 2;
+    if messages.len() > max_msgs {
+        let excess = messages.len() - max_msgs;
+        messages.drain(0..excess);
+    }
+}
+
 /// An LLM client for a local [Ollama](https://ollama.com) server.
 pub struct Ollama {
     base_url: String,
@@ -150,28 +159,24 @@ impl Ollama {
 
     fn trim_history(&self) {
         if let Ok(mut h) = self.history.lock() {
-            let max_msgs = self.max_turns * 2;
-            if h.len() > max_msgs {
-                let excess = h.len() - max_msgs;
-                h.drain(0..excess);
-            }
+            trim_messages(&mut h, self.max_turns);
         }
     }
 }
 
 impl Llm for Ollama {
     fn generate(&self, prompt: &str) -> Result<LlmResponse, Box<dyn Error + Send + Sync>> {
-        // Record the user turn, then hand the full history to the model.
-        if let Ok(mut h) = self.history.lock() {
-            h.push(ChatMessage::user(prompt));
-        }
-        self.trim_history();
+        // Build the request messages as a snapshot: existing history plus the
+        // new user turn. We do NOT mutate the persistent history yet, so a
+        // failed attempt (or a retry) never appends a duplicate user message.
+        let mut messages = self.history.lock().map(|h| h.clone()).unwrap_or_default();
+        messages.push(ChatMessage::user(prompt));
+        trim_messages(&mut messages, self.max_turns);
 
         let url = format!("{}/api/chat", self.base_url);
-        let snapshot = self.history.lock().map(|h| h.clone()).unwrap_or_default();
         let body = ChatRequest {
             model: &self.model,
-            messages: &snapshot,
+            messages: &messages,
             stream: true,
             system: self.system.as_deref(),
         };
@@ -188,6 +193,13 @@ impl Llm for Ollama {
                 "ollama returned status {status}"
             ))));
         }
+
+        // The request was accepted: commit the user turn. The assistant turn is
+        // appended lazily as the stream is read.
+        if let Ok(mut h) = self.history.lock() {
+            h.push(ChatMessage::user(prompt));
+        }
+        self.trim_history();
 
         let reader = BufReader::new(resp.into_body().into_reader());
         let stream = OllamaStream {
@@ -214,39 +226,57 @@ impl Iterator for OllamaStream {
     type Item = LlmStreamItem;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut line = String::new();
-        match self.reader.read_line(&mut line) {
-            Ok(0) => {
-                // Malformed stream ended without a done flag; save what we have.
-                self.save_assistant();
-                None
-            }
-            Ok(_) => {
-                let line = line.trim();
-                if line.is_empty() {
-                    return Some(Ok(String::new()));
+        loop {
+            let mut line = String::new();
+            match self.reader.read_line(&mut line) {
+                Ok(0) => {
+                    // Malformed stream ended without a done flag; save what we have.
+                    self.save_assistant();
+                    return None;
                 }
-                match serde_json::from_str::<ChatChunk>(line) {
-                    Ok(chunk) => {
-                        if let Some(err) = chunk.error {
-                            Some(Err(Box::<dyn Error + Send + Sync>::from(OllamaError(err))))
-                        } else if chunk.done {
-                            self.save_assistant();
-                            None
-                        } else {
+                Ok(_) => {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    match serde_json::from_str::<ChatChunk>(line) {
+                        Ok(chunk) => {
+                            if let Some(err) = chunk.error {
+                                return Some(Err(Box::<dyn Error + Send + Sync>::from(
+                                    OllamaError(err),
+                                )));
+                            }
+                            if chunk.done {
+                                // Some backends emit the final content on the
+                                // done chunk; flush it before saving.
+                                if let Some(msg) = chunk.message {
+                                    if !msg.content.trim().is_empty() {
+                                        self.accum.push_str(&msg.content);
+                                    }
+                                }
+                                self.save_assistant();
+                                return None;
+                            }
                             let text = chunk.message.map(|m| m.content).unwrap_or_default();
+                            if text.is_empty() {
+                                continue;
+                            }
                             self.accum.push_str(&text);
-                            Some(Ok(text))
+                            return Some(Ok(text));
+                        }
+                        Err(e) => {
+                            return Some(Err(Box::<dyn Error + Send + Sync>::from(OllamaError(
+                                format!("bad stream chunk: {e}"),
+                            ))));
                         }
                     }
-                    Err(e) => Some(Err(Box::<dyn Error + Send + Sync>::from(OllamaError(
-                        format!("bad stream chunk: {e}"),
-                    )))),
+                }
+                Err(e) => {
+                    return Some(Err(Box::<dyn Error + Send + Sync>::from(OllamaError(
+                        format!("read stream: {e}"),
+                    ))));
                 }
             }
-            Err(e) => Some(Err(Box::<dyn Error + Send + Sync>::from(OllamaError(
-                format!("read stream: {e}"),
-            )))),
         }
     }
 }
@@ -255,7 +285,7 @@ impl OllamaStream {
     /// Append the accumulated reply as an assistant turn, then clear it.
     fn save_assistant(&mut self) {
         let content = std::mem::take(&mut self.accum);
-        if content.is_empty() {
+        if content.trim().is_empty() {
             return;
         }
         if let Some(history) = &self.history {

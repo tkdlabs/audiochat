@@ -116,17 +116,18 @@ impl Pipeline {
         }
     }
 
-    /// Process a block of raw mic PCM, returning any transcripts produced.
     /// Process one captured utterance: STT -> LLM -> TTS -> playback.
     ///
     /// The playback gate is engaged only while audio is being emitted, so a
     /// background capture thread can keep recording during LLM latency. The
-    /// method blocks until the spoken reply has finished playing.
+    /// method blocks until the spoken reply has finished playing. `completed_at`
+    /// is the instant end-of-speech was detected, used as the latency origin.
     pub fn prompt(
         &mut self,
         utterance: &[i16],
+        completed_at: Instant,
     ) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
-        let start = Instant::now();
+        let start = completed_at;
         let mut timing = TurnTiming::default();
 
         let question = self.stt.transcribe(utterance)?;
@@ -208,13 +209,14 @@ impl Pipeline {
         if plain.is_empty() {
             return Ok(());
         }
-        // Audio will be emitted once enqueued; engage the gate so a background
-        // capture thread stops recording the assistant's voice from now on.
-        self.set_gate(true);
+        // Audio will be emitted once enqueued; engage the gate only then, so a
+        // background capture thread keeps recording during (potentially slow)
+        // synthesis rather than being muted while nothing is audible.
         self.ensure_sink()?;
         let pcm = with_retry("tts synthesize", 2, 200, || self.tts.synthesize(plain))?;
         if self.speak_replies && !pcm.is_empty() {
             if let Some(sink) = &self.sink {
+                self.set_gate(true);
                 sink.push(pcm);
             }
         }
