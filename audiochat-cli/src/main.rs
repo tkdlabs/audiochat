@@ -31,7 +31,9 @@ Options:
   --llm-url URL       Ollama base URL (default: http://localhost:11434).
   --system-prompt P   Override the default assistant system prompt (spoken style).
   --vad-threshold F   VAD RMS threshold (0..1); raise if pauses aren't detected.
-  --vad-silence MS    Trailing silence (ms) that ends an utterance (default 1200).
+  --vad-silence MS    Trailing silence (ms) that ends a candidate segment (default 600).
+                      Mid-sentence segments are held up to one more window by the
+                      STT endpointer, so brief pauses don't split a turn.
   -v, --verbose       Print per-turn latency metrics in --s2s.
   --silent            In --s2s, print replies but do not speak them.
   -h, --help          Show this help.

@@ -124,8 +124,16 @@ Markdown in LLM replies is stripped to plain text before synthesis, so Piper
 doesn't read out `###`, `*`, backticks, etc.
 
 If the app fires turns on brief pauses, raise the silence window with
-`--vad-silence 1500` (default 1200 ms). If it doesn't detect the end of speech,
+`--vad-silence 1500` (default 600 ms). If it doesn't detect the end of speech,
 raise `--vad-threshold` (e.g. `0.04`).
+
+Turn-ending is handled by a **sentence-boundary endpointer**, not the VAD's
+silence window alone: the VAD's `--vad-silence` window produces candidate
+segments, and the STT worker holds any candidate whose transcript doesn't end in
+`.` / `!` / `?` for up to one more window (waiting for the user to resume) before
+dispatching. This means a natural mid-sentence pause longer than the window
+continues the same turn instead of splitting it, while a completed thought still
+dispatches quickly.
 
 ## Status
 
