@@ -25,6 +25,9 @@ pub struct EnergyVad {
     armed: bool,
     /// Whether the most recently fed frame was classified as speech.
     last_frame_speech: bool,
+    /// RMS (0..1) of the most recently fed frame, for callers that want to
+    /// apply a different threshold than `threshold` (e.g. barge-in detection).
+    last_rms: f32,
     /// Cumulative samples of speech seen so far in the current utterance.
     speech_samples: usize,
     /// Rolling buffer of recent silence, prepended to each utterance so the
@@ -47,6 +50,7 @@ impl EnergyVad {
             silence_frames: 0,
             armed: false,
             last_frame_speech: false,
+            last_rms: 0.0,
             speech_samples: 0,
             pre_roll: VecDeque::new(),
             pre_roll_len: (sample_rate as usize * 200) / 1000, // 200 ms
@@ -78,7 +82,9 @@ impl EnergyVad {
 
         while self.leftover.len() >= self.frame_len {
             let frame: Vec<i16> = self.leftover.drain(..self.frame_len).collect();
-            let speech = rms(&frame) >= self.threshold;
+            let frame_rms = rms(&frame);
+            let speech = frame_rms >= self.threshold;
+            self.last_rms = frame_rms;
             self.last_frame_speech = speech;
 
             if speech {
@@ -118,6 +124,11 @@ impl EnergyVad {
     /// Whether the most recently fed frame was classified as speech.
     pub fn speech_in_last_frame(&self) -> bool {
         self.last_frame_speech
+    }
+
+    /// RMS (0..1) of the most recently fed frame, independent of `threshold`.
+    pub fn last_frame_rms(&self) -> f32 {
+        self.last_rms
     }
 
     /// Total speech samples accumulated for the in-progress utterance.
@@ -202,5 +213,15 @@ mod tests {
         let utt = vad.flush().unwrap();
         assert_eq!(utt.len(), frame * 2);
         assert!(utt[..frame].iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn reports_last_frame_rms() {
+        let mut vad = EnergyVad::new(16_000);
+        let frame = 480;
+        vad.feed(&speech(frame));
+        assert!(vad.last_frame_rms() > 0.0);
+        vad.feed(&silence(frame));
+        assert_eq!(vad.last_frame_rms(), 0.0);
     }
 }

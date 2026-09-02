@@ -106,6 +106,12 @@ interruption is transcribed as the next turn. Barge-in assumes **headphones or
 earbuds** so the mic doesn't pick up the assistant's own voice; without them the
 assistant may interrupt itself (echo cancellation is out of scope).
 
+Barge-in requires the user to talk noticeably louder than ordinary speech
+(default `--barge-threshold 0.06`, vs the normal `--vad-threshold 0.02`) for a
+sustained ~300 ms before it fires, to avoid cutting off the reply on faint echo
+or noise. If the assistant interrupts itself, raise `--barge-threshold` (e.g.
+`0.10`); if a deliberate "stop" is missed, lower it (e.g. `0.04`).
+
 Playback uses a single persistent output stream (opened once, sequential
 queue) rather than opening the device per chunk, which avoids ALSA "I/O error"
 churn from rapid open/close cycles.

@@ -34,9 +34,10 @@ const POST_PLAYBACK_COOLDOWN_MS: u64 = 250;
 /// Maximum audio (samples at 16 kHz) the endpointer holds while waiting for a
 /// sentence boundary, before it flushes anyway. ~30 s.
 const MAX_TURN_SAMPLES: usize = 30 * DEFAULT_SAMPLE_RATE as usize;
-/// Consecutive speech frames (~30 ms each) required to declare barge-in, so a
-/// single loud transient doesn't interrupt the assistant.
-const BARGE_IN_SPEECH_FRAMES: u64 = 3;
+/// Consecutive speech frames (~30 ms each) required to declare barge-in.
+/// ~300 ms debounces brief noises and the assistant's own voice leaking into
+/// the mic, so a stray sound doesn't cut off the reply.
+const BARGE_IN_SPEECH_FRAMES: u64 = 10;
 
 /// Shared controls handed to the background capture thread.
 struct CaptureCtrl {
@@ -51,6 +52,9 @@ struct CaptureCtrl {
     /// doesn't pick up the assistant's own voice (echo cancellation is out of
     /// scope), otherwise the assistant interrupts itself.
     barge_enabled: bool,
+    /// RMS threshold (0..1) that triggers barge-in, higher than the normal VAD
+    /// threshold so the user must clearly speak over the assistant.
+    barge_threshold: f32,
 }
 
 /// A completed utterance plus the instant the VAD detected end of speech, so
@@ -165,7 +169,6 @@ fn capture_loop(
             }
             continue;
         }
-
         if gate {
             // Assistant is speaking. Without barge-in we stay muted; with it,
             // listen for the user talking over playback.
@@ -177,8 +180,10 @@ fn capture_loop(
                 // abort and the VAD keeps the audio for the normal path.
                 let _ = utterance;
             }
-            let speech_now = vad.speech_in_last_frame();
-            if speech_now {
+            // Barge-in uses a higher threshold than ordinary speech, so the
+            // assistant's own (quiet) voice leaking into the mic doesn't count.
+            let loud_now = vad.last_frame_rms() >= ctrl.barge_threshold;
+            if loud_now {
                 gate_speech_frames += 1;
             } else {
                 gate_speech_frames = 0;
@@ -189,10 +194,9 @@ fn capture_loop(
                     log("talk", "barge-in detected");
                 }
             }
-            prev_speech = speech_now;
+            prev_speech = loud_now;
             continue;
         }
-
         let in_cooldown = Instant::now() < cooldown_until;
         if in_cooldown {
             continue;
@@ -372,6 +376,9 @@ pub struct Session {
     pub vad_max_silence_ms: u64,
     /// Whether the user may interrupt an in-progress reply by speaking.
     pub barge_in: bool,
+    /// RMS threshold (0..1) that triggers barge-in, higher than `vad_threshold`
+    /// so the user must clearly speak over the assistant.
+    pub barge_in_threshold: f32,
     /// Whether to log listening/muting activity to stderr.
     pub verbose: bool,
 }
@@ -382,6 +389,7 @@ impl Default for Session {
             vad_threshold: 0.02,
             vad_max_silence_ms: 600,
             barge_in: false,
+            barge_in_threshold: 0.06,
             verbose: false,
         }
     }
@@ -403,6 +411,14 @@ impl Session {
     /// own voice, since echo cancellation is out of scope.
     pub fn with_barge_in(mut self, enabled: bool) -> Self {
         self.barge_in = enabled;
+        self
+    }
+
+    /// Set the RMS threshold (0..1) that triggers barge-in. Raise it if the
+    /// assistant interrupts itself on faint echo/noise; lower it if a deliberate
+    /// "stop" isn't being recognized.
+    pub fn with_barge_in_threshold(mut self, threshold: f32) -> Self {
+        self.barge_in_threshold = threshold.clamp(0.0, 1.0);
         self
     }
 
@@ -454,6 +470,7 @@ impl Session {
             stop: Arc::clone(&stop_flag),
             barge,
             barge_enabled: self.barge_in,
+            barge_threshold: self.barge_in_threshold,
         };
         let verbose = self.verbose;
 

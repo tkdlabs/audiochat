@@ -36,6 +36,9 @@ Options:
                       STT endpointer, so brief pauses don't split a turn.
   --barge-in          Let the user interrupt a reply by speaking over it. Use
                       headphones so the mic doesn't hear the assistant's own voice.
+  --barge-threshold F RMS threshold (0..1) that triggers barge-in (default 0.06).
+                      Raise if the assistant interrupts itself; lower if it misses
+                      a deliberate stop.
   -v, --verbose       Print per-turn latency metrics in --s2s.
   --silent            In --s2s, print replies but do not speak them.
   -h, --help          Show this help.
@@ -62,6 +65,7 @@ struct Opts {
     vad_threshold: Option<f32>,
     vad_silence_ms: Option<u64>,
     barge_in: bool,
+    barge_threshold: Option<f32>,
     system_prompt: Option<String>,
 }
 
@@ -85,6 +89,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut vad_threshold: Option<f32> = None;
     let mut vad_silence_ms: Option<u64> = None;
     let mut barge_in = false;
+    let mut barge_threshold: Option<f32> = None;
     let mut system_prompt: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -143,6 +148,17 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 vad_silence_ms = Some(v);
             }
             "--barge-in" => barge_in = true,
+            "--barge-threshold" => {
+                i += 1;
+                let s = args.get(i).ok_or("--barge-threshold requires a value")?;
+                let v: f32 = s
+                    .parse()
+                    .map_err(|_| "--barge-threshold must be a number")?;
+                if !(0.0..=1.0).contains(&v) {
+                    return Err("--barge-threshold must be in 0..1".into());
+                }
+                barge_threshold = Some(v);
+            }
             "--system-prompt" => {
                 i += 1;
                 let p = args.get(i).ok_or("--system-prompt requires a value")?;
@@ -173,6 +189,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         vad_threshold,
         vad_silence_ms,
         barge_in,
+        barge_threshold,
         system_prompt: opt_or_env(system_prompt, "AUDIOCHAT_SYSTEM_PROMPT"),
     })
 }
@@ -295,6 +312,9 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         session = session.with_vad_max_silence(ms);
     }
     session = session.with_barge_in(opts.barge_in);
+    if let Some(t) = opts.barge_threshold {
+        session = session.with_barge_in_threshold(t);
+    }
     session = session.with_verbose(opts.verbose);
 
     let stop = Arc::new(AtomicBool::new(false));
