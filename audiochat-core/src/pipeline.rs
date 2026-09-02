@@ -9,9 +9,55 @@ use crate::audio_sink::AudioSink;
 use crate::config::AudioConfig;
 use crate::traits::{Llm, TextToSpeech};
 
-/// Sentence-ending punctuation used to chunk streamed LLM tokens for TTS.
+/// Minimum characters before a clause boundary (comma, etc.) triggers a flush,
+/// so we don't fragment into tiny, unnaturally-intoned chunks.
+const MIN_CLAUSE_CHARS: usize = 24;
+/// Maximum characters buffered before a chunk is forced to flush, split at a
+/// whitespace boundary so a word is never cut in half.
+const MAX_SEGMENT_CHARS: usize = 200;
+
+/// Sentence-ending punctuation, which always flushes the current chunk.
 fn is_sentence_boundary(segment: &str) -> bool {
     segment.ends_with('.') || segment.ends_with('!') || segment.ends_with('?')
+}
+
+/// Clause punctuation that, once the chunk has some content, is a good place to
+/// split for lower first-audio latency.
+fn is_clause_boundary(segment: &str) -> bool {
+    segment.ends_with(',')
+        || segment.ends_with(';')
+        || segment.ends_with(':')
+        || segment.ends_with('\n')
+}
+
+/// Split the accumulated `segment` into the next speakable chunk (if any) and
+/// the remainder to keep buffering. Returns `(chunk, rest)` where an empty
+/// `chunk` means "keep buffering".
+fn take_chunk(segment: &str) -> (String, String) {
+    let trimmed = segment.trim_end();
+    if trimmed.is_empty() {
+        return (String::new(), segment.to_string());
+    }
+
+    if is_sentence_boundary(trimmed) {
+        return (trimmed.to_string(), String::new());
+    }
+
+    if trimmed.len() >= MIN_CLAUSE_CHARS && is_clause_boundary(trimmed) {
+        return (trimmed.to_string(), String::new());
+    }
+
+    if segment.len() >= MAX_SEGMENT_CHARS {
+        let head = &segment[..MAX_SEGMENT_CHARS];
+        if let Some(i) = head.rfind(char::is_whitespace) {
+            let (chunk, rest) = segment.split_at(i);
+            return (chunk.trim_end().to_string(), rest.trim_start().to_string());
+        }
+        let (chunk, rest) = segment.split_at(MAX_SEGMENT_CHARS);
+        return (chunk.trim().to_string(), rest.trim_start().to_string());
+    }
+
+    (String::new(), segment.to_string())
 }
 
 /// Run a fallible closure with a fixed number of retries and exponential
@@ -157,13 +203,17 @@ impl Pipeline {
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
 
-                if is_sentence_boundary(segment.trim_end()) {
-                    self.synthesize_and_play(&segment)?;
+                loop {
+                    let (chunk, rest) = take_chunk(&segment);
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    segment = rest;
+                    self.synthesize_and_play(&chunk)?;
                     if !saw_first_audio {
                         timing.first_audio_ms = start.elapsed().as_millis() as u64;
                         saw_first_audio = true;
                     }
-                    segment.clear();
                 }
             }
         }
@@ -239,5 +289,45 @@ impl Pipeline {
             sink.drain();
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flushes_on_sentence_boundary() {
+        let (chunk, rest) = take_chunk("Hello world.");
+        assert_eq!(chunk, "Hello world.");
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn keeps_short_clause_buffered() {
+        let (chunk, rest) = take_chunk("Hi,");
+        assert_eq!(chunk, "");
+        assert_eq!(rest, "Hi,");
+    }
+
+    #[test]
+    fn flushes_on_clause_once_long_enough() {
+        let (chunk, rest) = take_chunk("This is a longer clause,");
+        assert_eq!(chunk, "This is a longer clause,");
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn splits_long_run_at_whitespace() {
+        let mut s = String::new();
+        for _ in 0..60 {
+            s.push_str("word ");
+        }
+        let (chunk, rest) = take_chunk(&s);
+        assert!(!chunk.is_empty());
+        assert!(chunk.len() <= MAX_SEGMENT_CHARS);
+        assert!(!rest.is_empty());
+        assert!(chunk.ends_with("word"));
+        assert!(rest.starts_with("word"));
     }
 }
