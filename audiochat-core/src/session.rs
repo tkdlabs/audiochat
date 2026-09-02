@@ -40,9 +40,12 @@ fn capture_loop(
     ctrl: CaptureCtrl,
     mic: MicCapture,
     utt_tx: mpsc::Sender<Vec<i16>>,
+    verbose: bool,
 ) {
     let mut vad = vad;
     let mut prev_gate = false;
+    let mut listening = true;
+    let mut prev_speech = false;
     let mut cooldown_until = Instant::now() - Duration::from_secs(1);
 
     while let Ok(pcm) = mic.rx.recv() {
@@ -53,21 +56,63 @@ fn capture_loop(
             // utterance and (on stop) ignore the assistant's audio tail.
             let _ = vad.flush();
             prev_gate = gate;
-            if !gate {
+            if verbose {
+                log(
+                    state_label(listening),
+                    if gate {
+                        "muted (assistant speaking)"
+                    } else {
+                        "playback done, pausing"
+                    },
+                );
+            }
+            if gate {
+                listening = false;
+            } else {
                 cooldown_until = Instant::now() + Duration::from_millis(POST_PLAYBACK_COOLDOWN_MS);
             }
             continue;
         }
 
-        if gate || Instant::now() < cooldown_until {
+        let in_cooldown = Instant::now() < cooldown_until;
+        if gate || in_cooldown {
             continue;
         }
-
-        for utterance in vad.feed(&pcm) {
-            if utterance.len() >= MIN_UTTERANCE_SAMPLES {
-                let _ = utt_tx.send(utterance);
+        if !listening {
+            listening = true;
+            if verbose {
+                log(state_label(listening), "listening for input...");
             }
         }
+
+        let mut dispatched = false;
+        for utterance in vad.feed(&pcm) {
+            let ms = utterance.len() * 1000 / DEFAULT_SAMPLE_RATE as usize;
+            if utterance.len() >= MIN_UTTERANCE_SAMPLES {
+                dispatched = true;
+                if verbose {
+                    log(
+                        state_label(listening),
+                        &format!("dispatched utterance ({ms} ms) -> STT"),
+                    );
+                }
+                let _ = utt_tx.send(utterance);
+            } else if verbose {
+                log(
+                    state_label(listening),
+                    &format!(
+                        "dropped short utterance ({ms} ms < {} ms)",
+                        MIN_UTTERANCE_SAMPLES * 1000 / DEFAULT_SAMPLE_RATE as usize
+                    ),
+                );
+            }
+        }
+
+        let speech_now = vad.speech_in_last_frame();
+        if !dispatched && speech_now && !prev_speech && verbose {
+            log(state_label(listening), "caught speech, listening...");
+        }
+        prev_speech = speech_now;
     }
 
     if let Some(utt) = vad.flush() {
@@ -77,6 +122,18 @@ fn capture_loop(
     }
 }
 
+fn state_label(listening: bool) -> &'static str {
+    if listening {
+        "talk"
+    } else {
+        "muted"
+    }
+}
+
+fn log(state: &str, msg: &str) {
+    eprintln!("[{state}] {msg}");
+}
+
 /// The main turn-taking session. Owns the pipeline/mic and drives the capture
 /// thread + processing loop.
 pub struct Session {
@@ -84,6 +141,8 @@ pub struct Session {
     pub vad_threshold: f32,
     /// Trailing silence (ms) that ends a spoken utterance.
     pub vad_max_silence_ms: u64,
+    /// Whether to log listening/muting activity to stderr.
+    pub verbose: bool,
 }
 
 impl Default for Session {
@@ -91,6 +150,7 @@ impl Default for Session {
         Self {
             vad_threshold: 0.02,
             vad_max_silence_ms: 1200,
+            verbose: false,
         }
     }
 }
@@ -109,6 +169,12 @@ impl Session {
     /// Set the trailing silence that ends an utterance.
     pub fn with_vad_max_silence(mut self, ms: u64) -> Self {
         self.vad_max_silence_ms = ms;
+        self
+    }
+
+    /// Enable/disable verbose listening/muting logging.
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
         self
     }
 
@@ -132,9 +198,14 @@ impl Session {
             .with_threshold(self.vad_threshold)
             .with_max_silence(self.vad_max_silence_ms);
         let ctrl = CaptureCtrl { gate };
+        let verbose = self.verbose;
         let handle = std::thread::spawn(move || {
-            capture_loop(vad, ctrl, mic, utt_tx);
+            capture_loop(vad, ctrl, mic, utt_tx, verbose);
         });
+
+        if verbose {
+            log("talk", "session started, listening for input...");
+        }
 
         loop {
             if let Some(s) = &stop {

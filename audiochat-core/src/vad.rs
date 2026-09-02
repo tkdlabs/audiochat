@@ -21,6 +21,10 @@ pub struct EnergyVad {
     silence_frames: u64,
     /// Whether any speech has been seen since the last flush.
     armed: bool,
+    /// Whether the most recently fed frame was classified as speech.
+    last_frame_speech: bool,
+    /// Cumulative samples of speech seen so far in the current utterance.
+    speech_samples: usize,
 }
 
 impl EnergyVad {
@@ -35,6 +39,8 @@ impl EnergyVad {
             utterance: Vec::new(),
             silence_frames: 0,
             armed: false,
+            last_frame_speech: false,
+            speech_samples: 0,
         }
     }
 
@@ -58,16 +64,19 @@ impl EnergyVad {
         while self.leftover.len() >= self.frame_len {
             let frame: Vec<i16> = self.leftover.drain(..self.frame_len).collect();
             let speech = rms(&frame) >= self.threshold;
+            self.last_frame_speech = speech;
 
             if speech {
                 self.armed = true;
                 self.silence_frames = 0;
+                self.speech_samples += frame.len();
                 self.utterance.extend_from_slice(&frame);
             } else if self.armed {
                 self.silence_frames += 1;
                 if self.silence_frames * self.frame_ms >= self.max_silence_ms {
                     completed.push(std::mem::take(&mut self.utterance));
                     self.armed = false;
+                    self.speech_samples = 0;
                     self.silence_frames = 0;
                 } else {
                     self.utterance.extend_from_slice(&frame);
@@ -76,6 +85,16 @@ impl EnergyVad {
         }
 
         completed
+    }
+
+    /// Whether the most recently fed frame was classified as speech.
+    pub fn speech_in_last_frame(&self) -> bool {
+        self.last_frame_speech
+    }
+
+    /// Total speech samples accumulated for the in-progress utterance.
+    pub fn speech_samples(&self) -> usize {
+        self.speech_samples
     }
 
     /// Force-flush any in-progress utterance.
@@ -87,6 +106,7 @@ impl EnergyVad {
         };
         self.armed = false;
         self.silence_frames = 0;
+        self.speech_samples = 0;
         self.leftover.clear();
         out
     }

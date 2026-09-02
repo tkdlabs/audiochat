@@ -286,6 +286,7 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     if let Some(ms) = opts.vad_silence_ms {
         session = session.with_vad_max_silence(ms);
     }
+    session = session.with_verbose(opts.verbose);
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_h = Arc::clone(&stop);

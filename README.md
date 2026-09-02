@@ -110,7 +110,10 @@ PIPER_BIN=$PWD/.venv/bin/piper cargo run -p audiochat-cli -- --s2s \
 
 Add `--silent` to print replies without speaking them. Add `--verbose` to print
 per-turn latency breakdown (STT → first-token → first-audio → stream end →
-total). All options have `AUDIOCHAT_*` env-var fallbacks (`AUDIOCHAT_DEVICE`,
+total) plus live capture diagnostics on stderr: when the app is listening vs.
+muted, when it catches speech, when it dispatches an utterance to STT, and when
+it drops a too-short utterance — useful for tuning `--vad-threshold` and
+`--vad-silence` if you're being cut off. All options have `AUDIOCHAT_*` env-var fallbacks (`AUDIOCHAT_DEVICE`,
 `AUDIOCHAT_TTS_MODEL`, `AUDIOCHAT_TTS_BIN`, `AUDIOCHAT_LLM_MODEL`,
 `AUDIOCHAT_LLM_URL`); flags take precedence. `--s2s` handles Ctrl-C gracefully,
 shutting down the capture thread and stopping playback before exit.
