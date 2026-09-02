@@ -111,6 +111,21 @@ impl AudioSink {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
+
+    /// Whether the queue is empty and nothing is currently playing.
+    pub fn is_idle(&self) -> bool {
+        let s = self.shared.lock().unwrap();
+        !s.is_playing()
+    }
+
+    /// Immediately stop playback: drop all queued audio and silence the output.
+    /// Used for barge-in, where the assistant should fall quiet at once.
+    pub fn stop(&self) {
+        let mut s = self.shared.lock().unwrap();
+        s.queue.clear();
+        s.cur.clear();
+        s.pos = 0;
+    }
 }
 
 /// Build the output stream whose callback drains `state` into `data`, writing

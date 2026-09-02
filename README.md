@@ -99,6 +99,13 @@ is **half-duplex** — a shared gate tells the capture thread to discard audio
 while the assistant's own reply is playing (so it doesn't hear itself), with a
 short cooldown after playback before listening resumes.
 
+With `--barge-in`, the user can interrupt an in-progress reply by speaking over
+it: the capture thread detects sustained speech during playback, the pipeline
+stops the current TTS (and the in-flight LLM stream) immediately, and the
+interruption is transcribed as the next turn. Barge-in assumes **headphones or
+earbuds** so the mic doesn't pick up the assistant's own voice; without them the
+assistant may interrupt itself (echo cancellation is out of scope).
+
 Playback uses a single persistent output stream (opened once, sequential
 queue) rather than opening the device per chunk, which avoids ALSA "I/O error"
 churn from rapid open/close cycles.

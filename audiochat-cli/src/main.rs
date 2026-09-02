@@ -34,6 +34,8 @@ Options:
   --vad-silence MS    Trailing silence (ms) that ends a candidate segment (default 600).
                       Mid-sentence segments are held up to one more window by the
                       STT endpointer, so brief pauses don't split a turn.
+  --barge-in          Let the user interrupt a reply by speaking over it. Use
+                      headphones so the mic doesn't hear the assistant's own voice.
   -v, --verbose       Print per-turn latency metrics in --s2s.
   --silent            In --s2s, print replies but do not speak them.
   -h, --help          Show this help.
@@ -59,6 +61,7 @@ struct Opts {
     verbose: bool,
     vad_threshold: Option<f32>,
     vad_silence_ms: Option<u64>,
+    barge_in: bool,
     system_prompt: Option<String>,
 }
 
@@ -81,6 +84,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut verbose = false;
     let mut vad_threshold: Option<f32> = None;
     let mut vad_silence_ms: Option<u64> = None;
+    let mut barge_in = false;
     let mut system_prompt: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -138,6 +142,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 let v: u64 = s.parse().map_err(|_| "--vad-silence must be a number")?;
                 vad_silence_ms = Some(v);
             }
+            "--barge-in" => barge_in = true,
             "--system-prompt" => {
                 i += 1;
                 let p = args.get(i).ok_or("--system-prompt requires a value")?;
@@ -167,6 +172,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         verbose,
         vad_threshold,
         vad_silence_ms,
+        barge_in,
         system_prompt: opt_or_env(system_prompt, "AUDIOCHAT_SYSTEM_PROMPT"),
     })
 }
@@ -288,6 +294,7 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     if let Some(ms) = opts.vad_silence_ms {
         session = session.with_vad_max_silence(ms);
     }
+    session = session.with_barge_in(opts.barge_in);
     session = session.with_verbose(opts.verbose);
 
     let stop = Arc::new(AtomicBool::new(false));

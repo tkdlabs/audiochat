@@ -129,6 +129,9 @@ pub struct Pipeline {
     /// Shared flag set while the assistant is speaking, so a background
     /// capture thread can stop recording the assistant's own voice.
     gate: Option<Arc<AtomicBool>>,
+    /// Shared flag set by the capture thread when the user speaks during
+    /// playback, requesting that the current reply be interrupted (barge-in).
+    barge: Option<Arc<AtomicBool>>,
 }
 
 impl Pipeline {
@@ -141,6 +144,7 @@ impl Pipeline {
             speak_replies: true,
             verbose: false,
             gate: None,
+            barge: None,
         }
     }
 
@@ -151,10 +155,37 @@ impl Pipeline {
         self
     }
 
+    /// Attach a barge-in flag. The capture thread sets it `true` when the user
+    /// speaks over playback; the pipeline polls it to stop the current reply.
+    pub fn with_barge(mut self, barge: Option<Arc<AtomicBool>>) -> Self {
+        self.barge = barge;
+        self
+    }
+
     fn set_gate(&self, v: bool) {
         if let Some(g) = &self.gate {
             g.store(v, Ordering::Release);
         }
+    }
+
+    fn barge_requested(&self) -> bool {
+        self.barge
+            .as_ref()
+            .map(|b| b.load(Ordering::Acquire))
+            .unwrap_or(false)
+    }
+
+    /// If a barge-in was requested, stop playback immediately and disengage the
+    /// gate. Returns `true` when the reply was interrupted.
+    fn handle_barge(&mut self) -> bool {
+        if !self.barge_requested() {
+            return false;
+        }
+        if let Some(sink) = &self.sink {
+            sink.stop();
+        }
+        self.set_gate(false);
+        true
     }
 
     /// Respond to a transcribed question: LLM -> TTS -> playback.
@@ -192,6 +223,12 @@ impl Pipeline {
 
         if let Some(stream) = resp.stream.take() {
             for item in stream {
+                if self.handle_barge() {
+                    if !reply.is_empty() {
+                        println!();
+                    }
+                    return Ok(None);
+                }
                 let token = item?;
                 if !saw_first_token {
                     timing.first_token_ms = start.elapsed().as_millis() as u64;
@@ -209,6 +246,12 @@ impl Pipeline {
                         break;
                     }
                     segment = rest;
+                    if self.handle_barge() {
+                        if !reply.is_empty() {
+                            println!();
+                        }
+                        return Ok(None);
+                    }
                     self.synthesize_and_play(&chunk)?;
                     if !saw_first_audio {
                         timing.first_audio_ms = start.elapsed().as_millis() as u64;
@@ -235,10 +278,20 @@ impl Pipeline {
 
         let did_reply = !reply.is_empty();
         if did_reply {
-            // Audio may still be draining from the last enqueue; ensure the
-            // gate stays engaged until everything has finished playing.
+            // Audio may still be draining from the last enqueue; keep the gate
+            // engaged until everything has finished playing, but allow the user
+            // to interrupt (barge-in) while we wait.
             self.set_gate(true);
-            self.wait_playback_done()?;
+            loop {
+                if self.handle_barge() {
+                    return Ok(None);
+                }
+                let idle = self.sink.as_ref().map(|s| s.is_idle()).unwrap_or(true);
+                if idle {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             self.set_gate(false);
         }
         Ok(did_reply.then_some(reply))
@@ -275,18 +328,6 @@ impl Pipeline {
     fn ensure_sink(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         if self.speak_replies && self.sink.is_none() {
             self.sink = Some(AudioSink::new(self.cfg)?);
-        }
-        Ok(())
-    }
-
-    /// Block until all synthesized audio for the current reply has finished
-    /// playing.
-    pub fn wait_playback_done(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if self.speak_replies {
-            self.ensure_sink()?;
-        }
-        if let Some(sink) = &self.sink {
-            sink.drain();
         }
         Ok(())
     }
@@ -329,5 +370,43 @@ mod tests {
         assert!(!rest.is_empty());
         assert!(chunk.ends_with("word"));
         assert!(rest.starts_with("word"));
+    }
+
+    struct NoopLlm;
+    impl Llm for NoopLlm {
+        fn generate(
+            &self,
+            _prompt: &str,
+        ) -> Result<crate::traits::LlmResponse, Box<dyn Error + Send + Sync>> {
+            Ok(crate::traits::LlmResponse {
+                stream: None,
+                full: String::new(),
+            })
+        }
+    }
+
+    struct NoopTts;
+    impl TextToSpeech for NoopTts {
+        fn synthesize(&mut self, _text: &str) -> Result<Vec<i16>, Box<dyn Error + Send + Sync>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn handle_barge_stops_playback_and_clears_gate() {
+        let gate = Arc::new(AtomicBool::new(true));
+        let barge = Arc::new(AtomicBool::new(false));
+        let mut p = Pipeline::new(Box::new(NoopLlm), Box::new(NoopTts))
+            .with_gate(Some(Arc::clone(&gate)))
+            .with_barge(Some(Arc::clone(&barge)));
+
+        // No barge-in requested: no-op, gate left engaged.
+        assert!(!p.handle_barge());
+        assert!(gate.load(Ordering::Acquire));
+
+        // Barge-in requested: playback stopped and gate disengaged.
+        barge.store(true, Ordering::Release);
+        assert!(p.handle_barge());
+        assert!(!gate.load(Ordering::Acquire));
     }
 }

@@ -7,6 +7,10 @@
 //! generating a (potentially slow) reply. A shared gate flag tells the capture
 //! thread to discard audio while the assistant is speaking (half-duplex), so
 //! the assistant's own voice doesn't become a new turn.
+//!
+//! With barge-in enabled (`Session::with_barge_in`), the capture thread instead
+//! listens for the user speaking over playback, signals the pipeline to stop
+//! the current reply, and captures the interruption as the next turn.
 
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +34,9 @@ const POST_PLAYBACK_COOLDOWN_MS: u64 = 250;
 /// Maximum audio (samples at 16 kHz) the endpointer holds while waiting for a
 /// sentence boundary, before it flushes anyway. ~30 s.
 const MAX_TURN_SAMPLES: usize = 30 * DEFAULT_SAMPLE_RATE as usize;
+/// Consecutive speech frames (~30 ms each) required to declare barge-in, so a
+/// single loud transient doesn't interrupt the assistant.
+const BARGE_IN_SPEECH_FRAMES: u64 = 3;
 
 /// Shared controls handed to the background capture thread.
 struct CaptureCtrl {
@@ -37,6 +44,13 @@ struct CaptureCtrl {
     gate: Arc<AtomicBool>,
     /// Set to true to ask the capture thread to stop (e.g. on Ctrl-C).
     stop: Arc<AtomicBool>,
+    /// Set by the capture thread when the user speaks over playback, asking the
+    /// pipeline to interrupt the current reply.
+    barge: Arc<AtomicBool>,
+    /// Whether barge-in is enabled. Requires headphones/earbuds so the mic
+    /// doesn't pick up the assistant's own voice (echo cancellation is out of
+    /// scope), otherwise the assistant interrupts itself.
+    barge_enabled: bool,
 }
 
 /// A completed utterance plus the instant the VAD detected end of speech, so
@@ -107,6 +121,7 @@ fn capture_loop(
     let mut prev_gate = false;
     let mut listening = true;
     let mut prev_speech = false;
+    let mut gate_speech_frames = 0u64;
     let mut cooldown_until = Instant::now() - Duration::from_secs(1);
 
     loop {
@@ -122,30 +137,64 @@ fn capture_loop(
         let gate = ctrl.gate.load(Ordering::Acquire);
 
         if gate != prev_gate {
-            // Either playback started or stopped: drop any partially-built
-            // utterance and (on stop) ignore the assistant's audio tail.
-            let _ = vad.flush();
             prev_gate = gate;
-            if verbose {
-                log(
-                    state_label(listening),
-                    if gate {
-                        "muted (assistant speaking)"
-                    } else {
-                        "playback done, pausing"
-                    },
-                );
-            }
+            gate_speech_frames = 0;
             if gate {
+                // Playback started: drop any partially-built utterance and mute.
+                let _ = vad.flush();
                 listening = false;
+                if verbose {
+                    log(state_label(listening), "muted (assistant speaking)");
+                }
+            } else if ctrl.barge.load(Ordering::Acquire) {
+                // The user interrupted: keep the in-progress utterance and
+                // resume listening immediately.
+                ctrl.barge.store(false, Ordering::Release);
+                listening = true;
+                if verbose {
+                    log(state_label(listening), "barge-in: listening for interrupt");
+                }
             } else {
+                // Normal end of playback: drop any partial and ignore the
+                // assistant's audio tail.
+                let _ = vad.flush();
                 cooldown_until = Instant::now() + Duration::from_millis(POST_PLAYBACK_COOLDOWN_MS);
+                if verbose {
+                    log(state_label(listening), "playback done, pausing");
+                }
             }
             continue;
         }
 
+        if gate {
+            // Assistant is speaking. Without barge-in we stay muted; with it,
+            // listen for the user talking over playback.
+            if !ctrl.barge_enabled {
+                continue;
+            }
+            for utterance in vad.feed(&pcm) {
+                // Don't dispatch while playback is active; the pipeline will
+                // abort and the VAD keeps the audio for the normal path.
+                let _ = utterance;
+            }
+            let speech_now = vad.speech_in_last_frame();
+            if speech_now {
+                gate_speech_frames += 1;
+            } else {
+                gate_speech_frames = 0;
+            }
+            if gate_speech_frames >= BARGE_IN_SPEECH_FRAMES && !ctrl.barge.load(Ordering::Relaxed) {
+                ctrl.barge.store(true, Ordering::Release);
+                if verbose {
+                    log("talk", "barge-in detected");
+                }
+            }
+            prev_speech = speech_now;
+            continue;
+        }
+
         let in_cooldown = Instant::now() < cooldown_until;
-        if gate || in_cooldown {
+        if in_cooldown {
             continue;
         }
         if !listening {
@@ -321,6 +370,8 @@ pub struct Session {
     /// Trailing silence (ms) that ends a candidate speech segment. The STT
     /// endpointer may hold a mid-sentence segment for up to one more window.
     pub vad_max_silence_ms: u64,
+    /// Whether the user may interrupt an in-progress reply by speaking.
+    pub barge_in: bool,
     /// Whether to log listening/muting activity to stderr.
     pub verbose: bool,
 }
@@ -330,6 +381,7 @@ impl Default for Session {
         Self {
             vad_threshold: 0.02,
             vad_max_silence_ms: 600,
+            barge_in: false,
             verbose: false,
         }
     }
@@ -343,6 +395,14 @@ impl Session {
     /// Set the VAD RMS threshold.
     pub fn with_vad_threshold(mut self, threshold: f32) -> Self {
         self.vad_threshold = threshold.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Enable/disable barge-in (interrupting a reply by speaking over it).
+    /// Requires headphones/earbuds so the mic doesn't pick up the assistant's
+    /// own voice, since echo cancellation is out of scope.
+    pub fn with_barge_in(mut self, enabled: bool) -> Self {
+        self.barge_in = enabled;
         self
     }
 
@@ -376,7 +436,10 @@ impl Session {
         stop: Option<Arc<AtomicBool>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let gate = Arc::new(AtomicBool::new(false));
-        pipeline = pipeline.with_gate(Some(Arc::clone(&gate)));
+        let barge = Arc::new(AtomicBool::new(false));
+        pipeline = pipeline
+            .with_gate(Some(Arc::clone(&gate)))
+            .with_barge(Some(Arc::clone(&barge)));
 
         let stop_flag = stop.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
 
@@ -389,6 +452,8 @@ impl Session {
         let ctrl = CaptureCtrl {
             gate,
             stop: Arc::clone(&stop_flag),
+            barge,
+            barge_enabled: self.barge_in,
         };
         let verbose = self.verbose;
 

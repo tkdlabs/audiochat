@@ -149,3 +149,7 @@ the session.
 - Noise suppression / echo cancellation
 - Mobile/embedded deployment packaging
 - Caching, buffering optimizations
+
+Barge-in (interrupting an in-progress reply by speaking) is implemented as an
+opt-in `--barge-in` mode; it still assumes headphones/earbuds since echo
+cancellation remains out of scope.

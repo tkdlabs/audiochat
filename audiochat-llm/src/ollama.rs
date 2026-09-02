@@ -296,6 +296,14 @@ impl OllamaStream {
     }
 }
 
+impl Drop for OllamaStream {
+    /// If the stream is dropped early (e.g. the user barged in mid-reply), still
+    /// commit whatever was streamed so the conversation history stays coherent.
+    fn drop(&mut self) {
+        self.save_assistant();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
