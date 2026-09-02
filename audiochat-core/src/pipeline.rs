@@ -1,12 +1,13 @@
 //! End-to-end speech-to-speech pipeline orchestration.
 
 use std::error::Error;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::audio_sink::AudioSink;
 use crate::config::AudioConfig;
 use crate::traits::{Llm, SpeechRecognizer, TextToSpeech};
-use crate::vad::EnergyVad;
 
 /// Sentence-ending punctuation used to chunk streamed LLM tokens for TTS.
 fn is_sentence_boundary(segment: &str) -> bool {
@@ -68,9 +69,8 @@ impl TurnTiming {
     }
 }
 
-/// Orchestrates mic -> VAD -> STT -> LLM -> TTS -> playback.
+/// Orchestrates STT -> LLM -> TTS -> playback for one spoken turn.
 pub struct Pipeline {
-    vad: EnergyVad,
     stt: Box<dyn SpeechRecognizer>,
     pub llm: Box<dyn Llm>,
     tts: Box<dyn TextToSpeech>,
@@ -80,10 +80,9 @@ pub struct Pipeline {
     pub speak_replies: bool,
     /// Whether to print per-turn latency metrics to stderr.
     pub verbose: bool,
-    /// RMS threshold (0..1) above which a frame counts as speech.
-    vad_threshold: f32,
-    /// Trailing silence (ms) that ends an utterance.
-    vad_max_silence_ms: u64,
+    /// Shared flag set while the assistant is speaking, so a background
+    /// capture thread can stop recording the assistant's own voice.
+    gate: Option<Arc<AtomicBool>>,
 }
 
 impl Pipeline {
@@ -93,7 +92,6 @@ impl Pipeline {
         tts: Box<dyn TextToSpeech>,
     ) -> Self {
         Self {
-            vad: EnergyVad::new(crate::DEFAULT_SAMPLE_RATE),
             stt,
             llm,
             tts,
@@ -101,41 +99,30 @@ impl Pipeline {
             sink: None,
             speak_replies: true,
             verbose: false,
-            vad_threshold: 0.02,
-            vad_max_silence_ms: 1200,
+            gate: None,
         }
     }
 
-    /// Set the VAD RMS threshold (0..1) above which audio counts as speech.
-    ///
-    /// A higher value treats signal more leniently as silence, so a lower mic
-    /// gain / quiet room is less likely to be mistaken for continuous speech.
-    pub fn with_vad_threshold(mut self, threshold: f32) -> Self {
-        self.vad_threshold = threshold.clamp(0.0, 1.0);
-        self.vad = self.vad.with_threshold(self.vad_threshold);
+    /// Attach a playback gate flag. The pipeline sets it `true` while audio
+    /// plays and `false` once playback finishes.
+    pub fn with_gate(mut self, gate: Option<Arc<AtomicBool>>) -> Self {
+        self.gate = gate;
         self
     }
 
-    /// Set the trailing silence (ms) that ends a spoken utterance.
-    pub fn with_vad_max_silence(mut self, ms: u64) -> Self {
-        self.vad_max_silence_ms = ms;
-        self.vad = self.vad.with_max_silence(ms);
-        self
+    fn set_gate(&self, v: bool) {
+        if let Some(g) = &self.gate {
+            g.store(v, Ordering::Release);
+        }
     }
 
     /// Process a block of raw mic PCM, returning any transcripts produced.
-    pub fn feed(&mut self, pcm: &[i16]) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
-        let mut out = Vec::new();
-        for utterance in self.vad.feed(pcm) {
-            if let Some(reply) = self.process_utterance(&utterance)? {
-                out.push(reply);
-            }
-        }
-        Ok(out)
-    }
-
-    /// Transcribe `utterance`, ask the LLM, and speak the streamed reply.
-    fn process_utterance(
+    /// Process one captured utterance: STT -> LLM -> TTS -> playback.
+    ///
+    /// The playback gate is engaged only while audio is being emitted, so a
+    /// background capture thread can keep recording during LLM latency. The
+    /// method blocks until the spoken reply has finished playing.
+    pub fn prompt(
         &mut self,
         utterance: &[i16],
     ) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
@@ -150,8 +137,8 @@ impl Pipeline {
         println!("you:  {question}");
 
         println!("ai:   ",);
-        // Retry generating the response; the reply could stream gradually, so
-        // only the initial call is retried (streams resume is not possible).
+        // Gate is FALSE here, so a background capture thread still records the
+        // user's speech during the (potentially long) LLM latency ahead.
         let mut resp = with_retry("llm generate", 3, 300, || self.llm.generate(&question))?;
         let mut reply = String::new();
         let mut segment = String::new();
@@ -196,7 +183,16 @@ impl Pipeline {
             timing.total_ms = start.elapsed().as_millis() as u64;
             timing.print();
         }
-        Ok((!reply.is_empty()).then_some(reply))
+
+        let did_reply = !reply.is_empty();
+        if did_reply {
+            // Audio may still be draining from the last enqueue; ensure the
+            // gate stays engaged until everything has finished playing.
+            self.set_gate(true);
+            self.wait_playback_done()?;
+            self.set_gate(false);
+        }
+        Ok(did_reply.then_some(reply))
     }
 
     /// Play `text` by synthesizing it and enqueuing to the audio sink.
@@ -212,6 +208,9 @@ impl Pipeline {
         if plain.is_empty() {
             return Ok(());
         }
+        // Audio will be emitted once enqueued; engage the gate so a background
+        // capture thread stops recording the assistant's voice from now on.
+        self.set_gate(true);
         self.ensure_sink()?;
         let pcm = with_retry("tts synthesize", 2, 200, || self.tts.synthesize(plain))?;
         if self.speak_replies && !pcm.is_empty() {
@@ -231,8 +230,7 @@ impl Pipeline {
     }
 
     /// Block until all synthesized audio for the current reply has finished
-    /// playing. Used for half-duplex turn-taking: the pipeline should not
-    /// listen for the next utterance until the previous reply has completed.
+    /// playing.
     pub fn wait_playback_done(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         if self.speak_replies {
             self.ensure_sink()?;
@@ -241,16 +239,5 @@ impl Pipeline {
             sink.drain();
         }
         Ok(())
-    }
-
-    /// Force-flush any pending VAD utterance (e.g. on shutdown).
-    pub fn flush(&mut self) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
-        let mut out = Vec::new();
-        if let Some(utterance) = self.vad.flush() {
-            if let Some(reply) = self.process_utterance(&utterance)? {
-                out.push(reply);
-            }
-        }
-        Ok(out)
     }
 }

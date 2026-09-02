@@ -3,8 +3,12 @@
 
 use std::path::PathBuf;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use audiochat_core::{
-    play_pcm, AudioConfig, EnergyVad, Llm, MicCapture, Pipeline, SpeechRecognizer, TextToSpeech,
+    play_pcm, AudioConfig, EnergyVad, Llm, MicCapture, Pipeline, Session, SpeechRecognizer,
+    TextToSpeech,
 };
 use audiochat_llm::Ollama;
 use audiochat_stt_whisper::WhisperRecognizer;
@@ -25,6 +29,7 @@ Options:
   --tts-bin PATH      Piper executable (default: $PIPER_BIN or \"piper\").
   --llm-model NAME    Ollama model name for --prompt/--s2s.
   --llm-url URL       Ollama base URL (default: http://localhost:11434).
+  --system-prompt P   Override the default assistant system prompt (spoken style).
   --vad-threshold F   VAD RMS threshold (0..1); raise if pauses aren't detected.
   --vad-silence MS    Trailing silence (ms) that ends an utterance (default 1200).
   -v, --verbose       Print per-turn latency metrics in --s2s.
@@ -52,6 +57,7 @@ struct Opts {
     verbose: bool,
     vad_threshold: Option<f32>,
     vad_silence_ms: Option<u64>,
+    system_prompt: Option<String>,
 }
 
 /// Resolve a CLI flag value, falling back to an environment variable.
@@ -73,6 +79,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut verbose = false;
     let mut vad_threshold: Option<f32> = None;
     let mut vad_silence_ms: Option<u64> = None;
+    let mut system_prompt: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -129,6 +136,11 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 let v: u64 = s.parse().map_err(|_| "--vad-silence must be a number")?;
                 vad_silence_ms = Some(v);
             }
+            "--system-prompt" => {
+                i += 1;
+                let p = args.get(i).ok_or("--system-prompt requires a value")?;
+                system_prompt = Some(p.clone());
+            }
             "--help" | "-h" => return Err(USAGE.to_string()),
             flag if flag.starts_with('-') => {
                 return Err(format!("unknown option: {flag}\n{USAGE}"))
@@ -153,19 +165,29 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         verbose,
         vad_threshold,
         vad_silence_ms,
+        system_prompt: opt_or_env(system_prompt, "AUDIOCHAT_SYSTEM_PROMPT"),
     })
 }
 
-fn run_llm(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let model = opts
-        .llm_model
-        .clone()
-        .ok_or("--prompt requires --llm-model <ollama-model>")?;
+/// Build the Ollama client from opts, applying any system-prompt override.
+fn build_llm(opts: &Opts) -> Ollama {
     let base = opts
         .llm_url
         .clone()
         .unwrap_or_else(|| "http://localhost:11434".to_string());
-    let client = Ollama::with_base(base, model);
+    let model = opts.llm_model.clone().unwrap_or_default();
+    let mut client = Ollama::with_base(base, model);
+    if let Some(p) = &opts.system_prompt {
+        client = client.with_system_prompt(Some(p.clone()));
+    }
+    client
+}
+
+fn run_llm(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if opts.llm_model.is_none() {
+        return Err("--prompt requires --llm-model <ollama-model>".into());
+    }
+    let client = build_llm(opts);
     let prompt = opts.prompt.as_deref().unwrap_or_default();
 
     println!("audiochat: asking ollama ({})...", client.model());
@@ -239,14 +261,9 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         .tts_model
         .as_ref()
         .ok_or("--s2s requires --tts-model <piper.onnx>")?;
-    let llm_model = opts
-        .llm_model
-        .clone()
-        .ok_or("--s2s requires --llm-model <ollama-model>")?;
-    let llm_url = opts
-        .llm_url
-        .clone()
-        .unwrap_or_else(|| "http://localhost:11434".to_string());
+    if opts.llm_model.is_none() {
+        return Err("--s2s requires --llm-model <ollama-model>".into());
+    }
     let tts_bin = opts
         .tts_bin
         .clone()
@@ -254,50 +271,33 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         .unwrap_or_else(|| "piper".to_string());
 
     let stt = Box::new(WhisperRecognizer::new(model)?);
-    let llm = Box::new(Ollama::with_base(llm_url, llm_model));
+    let llm = Box::new(build_llm(opts));
     let tts = Box::new(Piper::with_bin(tts_bin, tts_model)?);
 
     let mut pipeline = Pipeline::new(stt, llm, tts);
-    if let Some(t) = opts.vad_threshold {
-        pipeline = pipeline.with_vad_threshold(t);
-    }
-    if let Some(ms) = opts.vad_silence_ms {
-        pipeline = pipeline.with_vad_max_silence(ms);
-    }
     pipeline.speak_replies = !opts.silent;
     pipeline.verbose = opts.verbose;
     let mic = MicCapture::start_with_device(AudioConfig::default(), opts.device.as_deref())?;
 
-    let (sig_tx, sig_rx) = std::sync::mpsc::channel();
+    let mut session = Session::new();
+    if let Some(t) = opts.vad_threshold {
+        session = session.with_vad_threshold(t);
+    }
+    if let Some(ms) = opts.vad_silence_ms {
+        session = session.with_vad_max_silence(ms);
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_h = Arc::clone(&stop);
     ctrlc::set_handler(move || {
-        let _ = sig_tx.send(());
+        stop_h.store(true, Ordering::Relaxed);
     })
     .map_err(|e| format!("failed to install signal handler: {e}"))?;
 
     println!("audiochat: speech-to-speech mode. Speak to ask; Ctrl-C to stop.");
-    loop {
-        if sig_rx.try_recv().is_ok() {
-            println!("\naudiochat: stopping...");
-            pipeline.flush()?;
-            return Ok(());
-        }
-        match mic.rx.recv() {
-            Ok(pcm) => {
-                let replies = pipeline.feed(&pcm)?;
-                if !replies.is_empty() {
-                    // Half-duplex turn-taking: wait for the reply to finish
-                    // playing, then discard any audio captured during playback
-                    // (the assistant's own voice) before listening again.
-                    pipeline.wait_playback_done()?;
-                    while mic.rx.try_recv().is_ok() {}
-                }
-            }
-            Err(_) => {
-                pipeline.flush()?;
-                return Ok(());
-            }
-        }
-    }
+    session.run(mic, pipeline, Some(stop))?;
+    println!("\naudiochat: stopped.");
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

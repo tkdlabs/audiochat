@@ -42,7 +42,17 @@ pub struct Ollama {
     client: ureq::Agent,
     history: Arc<Mutex<Vec<ChatMessage>>>,
     max_turns: usize,
+    system: Option<String>,
 }
+
+/// Default system prompt: encourage short, conversational replies rather than
+/// lecture-style answers, since they are spoken aloud.
+const DEFAULT_SYSTEM_PROMPT: &str = "\
+You are an assistant having a natural spoken conversation. \
+Keep replies short, conversational, and to the point. \
+Speak like a dialog partner, not a lecture. \
+Avoid headings, lists, and long-winded explanations. \
+Use one or two sentences unless the user explicitly asks for more detail.";
 
 /// Request body for `/api/chat`.
 #[derive(Serialize)]
@@ -50,6 +60,8 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<&'a str>,
 }
 
 /// Per-chunk response line from the streaming `/api/chat` endpoint.
@@ -99,12 +111,19 @@ impl Ollama {
             client,
             history: Arc::new(Mutex::new(Vec::new())),
             max_turns: DEFAULT_MAX_TURNS,
+            system: Some(DEFAULT_SYSTEM_PROMPT.to_string()),
         }
     }
 
     /// The model this client is configured for.
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Override the system prompt. Pass `None` to run with no system prompt.
+    pub fn with_system_prompt(mut self, prompt: Option<impl Into<String>>) -> Self {
+        self.system = prompt.map(|p| p.into());
+        self
     }
 
     /// Number of conversation turns (user+assistant pairs) retained.
@@ -154,6 +173,7 @@ impl Llm for Ollama {
             model: &self.model,
             messages: &snapshot,
             stream: true,
+            system: self.system.as_deref(),
         };
 
         let resp = self

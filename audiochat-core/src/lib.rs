@@ -7,6 +7,7 @@ pub mod markdown;
 pub mod pipeline;
 pub mod playback;
 pub mod resample;
+pub mod session;
 pub mod traits;
 pub mod vad;
 
@@ -19,6 +20,7 @@ pub use markdown::strip_markdown;
 pub use pipeline::{Pipeline, TurnTiming};
 pub use playback::play_pcm;
 pub use resample::LinearResampler;
+pub use session::Session;
 pub use vad::EnergyVad;
 
 /// Default capture sample rate in Hz.

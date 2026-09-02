@@ -90,10 +90,12 @@ cargo run -p audiochat-cli -- --prompt "What is 2+2?" --llm-model gemma4:e2b
 
 `--s2s` drives the full loop: mic -> VAD -> STT -> LLM -> Piper -> speaker.
 LLM tokens stream to the console in real time while each completed sentence is
-synthesized and played. Turn-taking is **half-duplex**: the app stops listening
-while a reply is being spoken (so it doesn't hear the assistant's own voice),
-waits for the reply audio to finish, discards any mic audio captured during
-playback, then listens for your next question.
+synthesized and played. Capture runs on a **dedicated background thread**: the
+mic is recorded and VAD-segmented continuously and independently of the main
+thread, so speech spoken while the LLM is thinking is never lost. Turn-taking
+is **half-duplex** — a shared gate tells the capture thread to discard audio
+while the assistant's own reply is playing (so it doesn't hear itself), with a
+short cooldown after playback before listening resumes.
 
 Playback uses a single persistent output stream (opened once, sequential
 queue) rather than opening the device per chunk, which avoids ALSA "I/O error"
@@ -111,7 +113,7 @@ per-turn latency breakdown (STT → first-token → first-audio → stream end �
 total). All options have `AUDIOCHAT_*` env-var fallbacks (`AUDIOCHAT_DEVICE`,
 `AUDIOCHAT_TTS_MODEL`, `AUDIOCHAT_TTS_BIN`, `AUDIOCHAT_LLM_MODEL`,
 `AUDIOCHAT_LLM_URL`); flags take precedence. `--s2s` handles Ctrl-C gracefully,
-flushing the pending utterance before exit.
+shutting down the capture thread and stopping playback before exit.
 
 Markdown in LLM replies is stripped to plain text before synthesis, so Piper
 doesn't read out `###`, `*`, backticks, etc.

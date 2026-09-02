@@ -117,8 +117,9 @@ Status: `Pipeline` records a `TurnTiming` per spoken turn (STT, first-token,
 first-audio, full-stream, total latencies) printed to stderr when `--verbose` is
 on. Transient LLM/TTS failures retry with
 exponential backoff (`with_retry`). CLI options read `AUDIOCHAT_*` env vars as
-fallbacks (flag takes precedence). Graceful SIGINT shutdown in `--s2s` flushes
-the pending VAD utterance before exiting (via the `ctrlc` crate). Backends
+fallbacks (flag takes precedence). Graceful SIGINT shutdown in `--s2s` sets a
+stop flag read by the `Session` loop; it shuts down the background capture
+thread and playback before exiting (via the `ctrlc` crate). Backends
 (Ollama/Piper/whisper) are constructed identically to M1-M3.
 
 Remaining: mic-audio validation of the s2s loop on real hardware (headless env
