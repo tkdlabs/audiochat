@@ -29,6 +29,8 @@ Options:
   --tts-python PATH   Python interpreter with piper-tts installed (default: python3).
   --llm-model NAME    Ollama model name for --prompt/--s2s.
   --llm-url URL       Ollama base URL (default: http://localhost:11434).
+  --llm-temperature F Sampling temperature (0..2); default is the model's.
+  --llm-num-ctx N     Context window size in tokens; default is the model's.
   --system-prompt P   Override the default assistant system prompt (spoken style).
   --vad-threshold F   Minimum VAD RMS threshold (0..1). With adaptive noise
                       (default) the threshold auto-rises above this as the room
@@ -65,6 +67,8 @@ struct Opts {
     prompt: Option<String>,
     llm_model: Option<String>,
     llm_url: Option<String>,
+    llm_temperature: Option<f32>,
+    llm_num_ctx: Option<u32>,
     s2s: bool,
     silent: bool,
     verbose: bool,
@@ -82,6 +86,16 @@ fn opt_or_env(cli: Option<String>, env: &str) -> Option<String> {
     cli.or_else(|| std::env::var(env).ok().filter(|s| !s.is_empty()))
 }
 
+/// Resolve a CLI float flag, falling back to a parsed environment variable.
+fn opt_float_or_env(cli: Option<f32>, env: &str) -> Option<f32> {
+    cli.or_else(|| std::env::var(env).ok().and_then(|s| s.parse().ok()))
+}
+
+/// Resolve a CLI integer flag, falling back to a parsed environment variable.
+fn opt_u32_or_env(cli: Option<u32>, env: &str) -> Option<u32> {
+    cli.or_else(|| std::env::var(env).ok().and_then(|s| s.parse().ok()))
+}
+
 fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut model: Option<PathBuf> = None;
     let mut device: Option<String> = None;
@@ -91,6 +105,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut prompt: Option<String> = None;
     let mut llm_model: Option<String> = None;
     let mut llm_url: Option<String> = None;
+    let mut llm_temperature: Option<f32> = None;
+    let mut llm_num_ctx: Option<u32> = None;
     let mut s2s = false;
     let mut silent = false;
     let mut verbose = false;
@@ -131,6 +147,23 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 i += 1;
                 let m = args.get(i).ok_or("--llm-url requires a URL")?;
                 llm_url = Some(m.clone());
+            }
+            "--llm-temperature" => {
+                i += 1;
+                let s = args.get(i).ok_or("--llm-temperature requires a value")?;
+                let v: f32 = s
+                    .parse()
+                    .map_err(|_| "--llm-temperature must be a number")?;
+                if !(0.0..=2.0).contains(&v) {
+                    return Err("--llm-temperature must be in 0..2".into());
+                }
+                llm_temperature = Some(v);
+            }
+            "--llm-num-ctx" => {
+                i += 1;
+                let s = args.get(i).ok_or("--llm-num-ctx requires a value")?;
+                let v: u32 = s.parse().map_err(|_| "--llm-num-ctx must be a number")?;
+                llm_num_ctx = Some(v);
             }
             "--tts-model" => {
                 i += 1;
@@ -203,6 +236,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         prompt,
         llm_model: opt_or_env(llm_model, "AUDIOCHAT_LLM_MODEL"),
         llm_url: opt_or_env(llm_url, "AUDIOCHAT_LLM_URL"),
+        llm_temperature: opt_float_or_env(llm_temperature, "AUDIOCHAT_LLM_TEMPERATURE"),
+        llm_num_ctx: opt_u32_or_env(llm_num_ctx, "AUDIOCHAT_LLM_NUM_CTX"),
         s2s,
         silent,
         verbose,
@@ -226,6 +261,12 @@ fn build_llm(opts: &Opts) -> Ollama {
     let mut client = Ollama::with_base(base, model);
     if let Some(p) = &opts.system_prompt {
         client = client.with_system_prompt(Some(p.clone()));
+    }
+    if let Some(t) = opts.llm_temperature {
+        client = client.with_temperature(Some(t));
+    }
+    if let Some(n) = opts.llm_num_ctx {
+        client = client.with_num_ctx(Some(n));
     }
     client
 }

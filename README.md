@@ -95,6 +95,13 @@ cargo run -p audiochat-cli -- --prompt "What is 2+2?" \
 `--llm-url` (or env `AUDIOCHAT_LLM_URL`) sets the Ollama base URL. Use this
 when Ollama runs on a different machine or a non-default port.
 
+Sampling is configurable per request: `--llm-temperature 0.7` (env
+`AUDIOCHAT_LLM_TEMPERATURE`) sets the temperature and `--llm-num-ctx 4096` (env
+`AUDIOCHAT_LLM_NUM_CTX`) sets the context window in tokens; both fall back to
+the model's defaults. A lower temperature makes replies more deterministic (a
+gemma-default 0.8 can feel rambling); a larger `num_ctx` helps long
+conversations.
+
 ## Speech-to-speech (end to end)
 
 `--s2s` drives the full loop: mic -> VAD -> STT -> LLM -> Piper -> speaker.

@@ -52,6 +52,10 @@ pub struct Ollama {
     history: Arc<Mutex<Vec<ChatMessage>>>,
     max_turns: usize,
     system: Option<String>,
+    /// Sampling temperature (None = model default).
+    temperature: Option<f32>,
+    /// Context window size in tokens (None = model default).
+    num_ctx: Option<u32>,
 }
 
 /// Default system prompt: encourage short, conversational replies rather than
@@ -71,6 +75,17 @@ struct ChatRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<ChatOptions>,
+}
+
+/// Sampling options forwarded to `/api/chat`. Absent fields keep Ollama's defaults.
+#[derive(Serialize, Default)]
+struct ChatOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_ctx: Option<u32>,
 }
 
 /// Per-chunk response line from the streaming `/api/chat` endpoint.
@@ -121,6 +136,8 @@ impl Ollama {
             history: Arc::new(Mutex::new(Vec::new())),
             max_turns: DEFAULT_MAX_TURNS,
             system: Some(DEFAULT_SYSTEM_PROMPT.to_string()),
+            temperature: None,
+            num_ctx: None,
         }
     }
 
@@ -132,6 +149,18 @@ impl Ollama {
     /// Override the system prompt. Pass `None` to run with no system prompt.
     pub fn with_system_prompt(mut self, prompt: Option<impl Into<String>>) -> Self {
         self.system = prompt.map(|p| p.into());
+        self
+    }
+
+    /// Set the sampling temperature (0..2). `None` uses the model default.
+    pub fn with_temperature(mut self, temperature: Option<f32>) -> Self {
+        self.temperature = temperature.map(|t| t.clamp(0.0, 2.0));
+        self
+    }
+
+    /// Set the context window size in tokens. `None` uses the model default.
+    pub fn with_num_ctx(mut self, num_ctx: Option<u32>) -> Self {
+        self.num_ctx = num_ctx;
         self
     }
 
@@ -179,6 +208,14 @@ impl Llm for Ollama {
             messages: &messages,
             stream: true,
             system: self.system.as_deref(),
+            options: if self.temperature.is_none() && self.num_ctx.is_none() {
+                None
+            } else {
+                Some(ChatOptions {
+                    temperature: self.temperature,
+                    num_ctx: self.num_ctx,
+                })
+            },
         };
 
         let resp = self
@@ -346,5 +383,38 @@ mod tests {
         let mut client = Ollama::with_base("http://localhost:11434", "test-model");
         client.set_max_turns(0);
         assert_eq!(client.max_turns(), 1);
+    }
+
+    #[test]
+    fn request_serializes_options_and_omits_defaults() {
+        let client = Ollama::with_base("http://localhost:11434", "m")
+            .with_temperature(Some(0.7))
+            .with_num_ctx(Some(4096));
+        let body = ChatRequest {
+            model: "m",
+            messages: &[],
+            stream: true,
+            system: None,
+            options: Some(ChatOptions {
+                temperature: client.temperature,
+                num_ctx: client.num_ctx,
+            }),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"temperature\":0.7"));
+        assert!(json.contains("\"num_ctx\":4096"));
+        assert!(!json.contains("system"));
+
+        // No options configured -> the field is omitted entirely (mirrors the
+        // real `generate`, which passes `options: None` when unset).
+        let body = ChatRequest {
+            model: "m",
+            messages: &[],
+            stream: true,
+            system: None,
+            options: None,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(!json.contains("options"));
     }
 }
