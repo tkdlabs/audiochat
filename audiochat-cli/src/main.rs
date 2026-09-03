@@ -30,7 +30,13 @@ Options:
   --llm-model NAME    Ollama model name for --prompt/--s2s.
   --llm-url URL       Ollama base URL (default: http://localhost:11434).
   --system-prompt P   Override the default assistant system prompt (spoken style).
-  --vad-threshold F   VAD RMS threshold (0..1); raise if pauses aren't detected.
+  --vad-threshold F   Minimum VAD RMS threshold (0..1). With adaptive noise
+                      (default) the threshold auto-rises above this as the room
+                      gets noisier; with --no-adaptive it's a fixed threshold.
+  --noise-ratio F     Adaptive noise multiplier (default 2.0): effective threshold
+                      = max(vad-threshold, measured_noise * F).
+  --no-adaptive       Disable adaptive noise tracking; use --vad-threshold as a
+                      fixed absolute threshold.
   --vad-silence MS    Trailing silence (ms) that ends a candidate segment (default 600).
                       Mid-sentence segments are held up to one more window by the
                       STT endpointer, so brief pauses don't split a turn.
@@ -63,6 +69,8 @@ struct Opts {
     silent: bool,
     verbose: bool,
     vad_threshold: Option<f32>,
+    noise_ratio: Option<f32>,
+    adaptive_noise: bool,
     vad_silence_ms: Option<u64>,
     barge_in: bool,
     barge_threshold: Option<f32>,
@@ -87,6 +95,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut silent = false;
     let mut verbose = false;
     let mut vad_threshold: Option<f32> = None;
+    let mut noise_ratio: Option<f32> = None;
+    let mut adaptive_noise = true;
     let mut vad_silence_ms: Option<u64> = None;
     let mut barge_in = false;
     let mut barge_threshold: Option<f32> = None;
@@ -141,6 +151,16 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 }
                 vad_threshold = Some(v);
             }
+            "--noise-ratio" => {
+                i += 1;
+                let s = args.get(i).ok_or("--noise-ratio requires a value")?;
+                let v: f32 = s.parse().map_err(|_| "--noise-ratio must be a number")?;
+                if v < 1.0 {
+                    return Err("--noise-ratio must be >= 1.0".into());
+                }
+                noise_ratio = Some(v);
+            }
+            "--no-adaptive" => adaptive_noise = false,
             "--vad-silence" => {
                 i += 1;
                 let s = args.get(i).ok_or("--vad-silence requires a value")?;
@@ -187,6 +207,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         silent,
         verbose,
         vad_threshold,
+        noise_ratio,
+        adaptive_noise,
         vad_silence_ms,
         barge_in,
         barge_threshold,
@@ -307,6 +329,12 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     let mut session = Session::new();
     if let Some(t) = opts.vad_threshold {
         session = session.with_vad_threshold(t);
+    }
+    if let Some(r) = opts.noise_ratio {
+        session = session.with_noise_ratio(r);
+    }
+    if !opts.adaptive_noise {
+        session = session.with_adaptive_noise(false);
     }
     if let Some(ms) = opts.vad_silence_ms {
         session = session.with_vad_max_silence(ms);

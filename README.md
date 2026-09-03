@@ -83,10 +83,17 @@ turns by default) with the oldest turns dropped; call `reset_conversation()` on
 the client to clear it.
 
 ```
-# Ask Ollama a question (it must be running on localhost:11434):
+# Ask Ollama a question (defaults to localhost:11434):
 ollama pull gemma4:e2b   # or any installed model
 cargo run -p audiochat-cli -- --prompt "What is 2+2?" --llm-model gemma4:e2b
+
+# Point to a remote Ollama server:
+cargo run -p audiochat-cli -- --prompt "What is 2+2?" \
+  --llm-model gemma4:e2b --llm-url http://192.168.1.50:11434
 ```
+
+`--llm-url` (or env `AUDIOCHAT_LLM_URL`) sets the Ollama base URL. Use this
+when Ollama runs on a different machine or a non-default port.
 
 ## Speech-to-speech (end to end)
 
@@ -136,9 +143,14 @@ shutting down the capture thread and stopping playback before exit.
 Markdown in LLM replies is stripped to plain text before synthesis, so Piper
 doesn't read out `###`, `*`, backticks, etc.
 
-If the app fires turns on brief pauses, raise the silence window with
-`--vad-silence 1500` (default 600 ms). If it doesn't detect the end of speech,
-raise `--vad-threshold` (e.g. `0.04`).
+The VAD adapts to the room's background noise by default: it tracks the recent
+noise floor and classifies speech only above `max(vad-threshold, noise * ratio)`
+(`--vad-threshold 0.02`, `--noise-ratio 2.0` by default). A noisy room (a fan,
+blower, etc.) automatically raises the effective threshold, so you generally
+don't need to hand-tune it per session. Pass `--no-adaptive` to disable this and
+use `--vad-threshold` as a fixed absolute threshold instead. If it doesn't
+detect the end of speech, raise `--vad-threshold` (e.g. `0.04`) or lower
+`--noise-ratio`.
 
 Turn-ending is handled by a **sentence-boundary endpointer**, not the VAD's
 silence window alone: the VAD's `--vad-silence` window produces candidate

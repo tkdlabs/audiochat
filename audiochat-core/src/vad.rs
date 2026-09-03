@@ -35,11 +35,22 @@ pub struct EnergyVad {
     pre_roll: VecDeque<i16>,
     /// Maximum pre-roll length in samples.
     pre_roll_len: usize,
+    /// Whether to estimate a background noise floor and raise the effective
+    /// threshold above `threshold` as the room gets noisier.
+    adaptive: bool,
+    /// Rolling window of recent frame RMS values; its minimum is the noise floor.
+    noise_window: VecDeque<f32>,
+    /// Maximum number of frames kept in `noise_window` (~2 s).
+    noise_window_len: usize,
+    /// Multiplier applied to the noise floor when `adaptive` is enabled.
+    noise_ratio: f32,
 }
 
 impl EnergyVad {
     pub fn new(sample_rate: u32) -> Self {
         let frame_len = (sample_rate as usize * 30) / 1000; // 30 ms
+                                                            // ~2 s of 30 ms frames, used to estimate the background noise floor.
+        let noise_window_len = (2 * sample_rate as usize) / frame_len;
         Self {
             threshold: 0.01,
             frame_len,
@@ -54,6 +65,10 @@ impl EnergyVad {
             speech_samples: 0,
             pre_roll: VecDeque::new(),
             pre_roll_len: (sample_rate as usize * 200) / 1000, // 200 ms
+            adaptive: true,
+            noise_window: VecDeque::new(),
+            noise_window_len,
+            noise_ratio: 2.0,
         }
     }
 
@@ -75,6 +90,41 @@ impl EnergyVad {
         self
     }
 
+    /// Enable or disable adaptive noise-floor tracking. When enabled (default),
+    /// the effective threshold is `max(threshold, noise_floor * noise_ratio)`,
+    /// so a noisier room automatically raises the threshold.
+    pub fn with_adaptive_noise(mut self, adaptive: bool) -> Self {
+        self.adaptive = adaptive;
+        self
+    }
+
+    /// Set the multiplier applied to the estimated noise floor when adaptive
+    /// noise tracking is enabled (default 2.0).
+    pub fn with_noise_ratio(mut self, ratio: f32) -> Self {
+        self.noise_ratio = ratio;
+        self
+    }
+
+    /// Estimated background noise floor: the minimum frame RMS seen in the
+    /// recent noise window (0.0 before any audio has been fed).
+    pub fn noise_floor(&self) -> f32 {
+        self.noise_window
+            .iter()
+            .copied()
+            .reduce(f32::min)
+            .unwrap_or(0.0)
+    }
+
+    /// The RMS threshold currently used to classify speech, after applying
+    /// adaptive noise-floor tracking (if enabled).
+    pub fn current_threshold(&self) -> f32 {
+        if self.adaptive {
+            self.threshold.max(self.noise_floor() * self.noise_ratio)
+        } else {
+            self.threshold
+        }
+    }
+
     /// Feed a block of PCM, returning any completed utterances.
     pub fn feed(&mut self, pcm: &[i16]) -> Vec<Vec<i16>> {
         self.leftover.extend_from_slice(pcm);
@@ -83,9 +133,14 @@ impl EnergyVad {
         while self.leftover.len() >= self.frame_len {
             let frame: Vec<i16> = self.leftover.drain(..self.frame_len).collect();
             let frame_rms = rms(&frame);
-            let speech = frame_rms >= self.threshold;
+            let speech = frame_rms >= self.current_threshold();
             self.last_rms = frame_rms;
             self.last_frame_speech = speech;
+
+            self.noise_window.push_back(frame_rms);
+            if self.noise_window.len() > self.noise_window_len {
+                self.noise_window.pop_front();
+            }
 
             if speech {
                 if !self.armed {
@@ -223,5 +278,52 @@ mod tests {
         assert!(vad.last_frame_rms() > 0.0);
         vad.feed(&silence(frame));
         assert_eq!(vad.last_frame_rms(), 0.0);
+    }
+
+    #[test]
+    fn adaptive_noise_raises_threshold() {
+        let mut vad = EnergyVad::new(16_000)
+            .with_adaptive_noise(true)
+            .with_threshold(0.01);
+        let frame = 480;
+        // Background noise at RMS ~0.02.
+        vad.feed(&vec![655; frame]);
+        // The noise floor raises the threshold above the noise level.
+        assert!(vad.current_threshold() > 0.02);
+        // A frame just above the noise but below the raised threshold is silence.
+        vad.feed(&vec![983; frame]); // RMS ~0.03
+        assert!(!vad.speech_in_last_frame());
+    }
+
+    #[test]
+    fn adaptive_noise_tracks_rising_noise() {
+        let mut vad = EnergyVad::new(16_000)
+            .with_adaptive_noise(true)
+            .with_threshold(0.01);
+        let frame = 480;
+        // Quiet room: threshold stays at the floor.
+        for _ in 0..70 {
+            vad.feed(&vec![1; frame]);
+        }
+        assert_eq!(vad.current_threshold(), 0.01);
+        // Sustained loud background noise (~2 s) pushes the floor up.
+        let noise = vec![1966; frame]; // RMS ~0.06
+        for _ in 0..70 {
+            vad.feed(&noise);
+        }
+        assert!(vad.current_threshold() > 0.06);
+    }
+
+    #[test]
+    fn non_adaptive_uses_fixed_threshold() {
+        let mut vad = EnergyVad::new(16_000)
+            .with_adaptive_noise(false)
+            .with_threshold(0.01);
+        let frame = 480;
+        for _ in 0..70 {
+            vad.feed(&vec![655; frame]); // RMS ~0.02 noise
+        }
+        // Without adaptation the threshold is untouched by the noise.
+        assert_eq!(vad.current_threshold(), 0.01);
     }
 }

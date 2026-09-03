@@ -369,8 +369,16 @@ fn log(state: &str, msg: &str) {
 /// The main turn-taking session. Owns the pipeline/mic and drives the capture
 /// thread + processing loop.
 pub struct Session {
-    /// RMS threshold (0..1) above which a frame counts as speech.
+    /// RMS threshold (0..1) above which a frame counts as speech. With adaptive
+    /// noise tracking (the default) this is a floor: the effective threshold
+    /// rises above it as background noise increases.
     pub vad_threshold: f32,
+    /// Whether to track a background noise floor and raise the effective VAD
+    /// threshold above `vad_threshold` as the room gets noisier.
+    pub adaptive_noise: bool,
+    /// Multiplier applied to the estimated noise floor when `adaptive_noise` is
+    /// enabled: effective threshold = max(vad_threshold, noise_floor * ratio).
+    pub noise_ratio: f32,
     /// Trailing silence (ms) that ends a candidate speech segment. The STT
     /// endpointer may hold a mid-sentence segment for up to one more window.
     pub vad_max_silence_ms: u64,
@@ -387,6 +395,8 @@ impl Default for Session {
     fn default() -> Self {
         Self {
             vad_threshold: 0.02,
+            adaptive_noise: true,
+            noise_ratio: 2.0,
             vad_max_silence_ms: 600,
             barge_in: false,
             barge_in_threshold: 0.06,
@@ -403,6 +413,21 @@ impl Session {
     /// Set the VAD RMS threshold.
     pub fn with_vad_threshold(mut self, threshold: f32) -> Self {
         self.vad_threshold = threshold.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Enable/disable adaptive noise-floor tracking (on by default). When on,
+    /// the effective VAD threshold rises above `vad_threshold` as background
+    /// noise increases; when off, `vad_threshold` is a fixed absolute threshold.
+    pub fn with_adaptive_noise(mut self, enabled: bool) -> Self {
+        self.adaptive_noise = enabled;
+        self
+    }
+
+    /// Set the multiplier applied to the estimated noise floor when adaptive
+    /// noise tracking is enabled (default 2.0).
+    pub fn with_noise_ratio(mut self, ratio: f32) -> Self {
+        self.noise_ratio = ratio.max(1.0);
         self
     }
 
@@ -464,7 +489,9 @@ impl Session {
 
         let vad = EnergyVad::new(DEFAULT_SAMPLE_RATE)
             .with_threshold(self.vad_threshold)
-            .with_max_silence(self.vad_max_silence_ms);
+            .with_max_silence(self.vad_max_silence_ms)
+            .with_adaptive_noise(self.adaptive_noise)
+            .with_noise_ratio(self.noise_ratio);
         let ctrl = CaptureCtrl {
             gate,
             stop: Arc::clone(&stop_flag),
