@@ -33,6 +33,31 @@ impl ChatMessage {
             content: content.into(),
         }
     }
+
+    fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: "system".into(),
+            content: content.into(),
+        }
+    }
+}
+
+/// Build the messages for a `/api/chat` request: system prompt (if any) first,
+/// then the bounded conversation history plus the new user turn. The system
+/// message is inserted only after trimming, so it is never dropped.
+fn build_request_messages(
+    history: &[ChatMessage],
+    prompt: &str,
+    system: Option<&str>,
+    max_turns: usize,
+) -> Vec<ChatMessage> {
+    let mut messages = history.to_vec();
+    messages.push(ChatMessage::user(prompt));
+    trim_messages(&mut messages, max_turns);
+    if let Some(system) = system {
+        messages.insert(0, ChatMessage::system(system));
+    }
+    messages
 }
 
 /// Trim the oldest messages so at most `max_turns` user+assistant pairs remain.
@@ -73,8 +98,6 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<ChatOptions>,
 }
@@ -198,16 +221,16 @@ impl Llm for Ollama {
         // Build the request messages as a snapshot: existing history plus the
         // new user turn. We do NOT mutate the persistent history yet, so a
         // failed attempt (or a retry) never appends a duplicate user message.
-        let mut messages = self.history.lock().map(|h| h.clone()).unwrap_or_default();
-        messages.push(ChatMessage::user(prompt));
-        trim_messages(&mut messages, self.max_turns);
+        let messages = {
+            let history = self.history.lock().map(|h| h.clone()).unwrap_or_default();
+            build_request_messages(&history, prompt, self.system.as_deref(), self.max_turns)
+        };
 
         let url = format!("{}/api/chat", self.base_url);
         let body = ChatRequest {
             model: &self.model,
             messages: &messages,
             stream: true,
-            system: self.system.as_deref(),
             options: if self.temperature.is_none() && self.num_ctx.is_none() {
                 None
             } else {
@@ -398,7 +421,6 @@ mod tests {
             model: "m",
             messages: &[],
             stream: true,
-            system: None,
             options: Some(ChatOptions {
                 temperature: client.temperature,
                 num_ctx: client.num_ctx,
@@ -415,10 +437,39 @@ mod tests {
             model: "m",
             messages: &[],
             stream: true,
-            system: None,
             options: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(!json.contains("options"));
+    }
+
+    #[test]
+    fn system_message_is_prepended_and_never_trimmed() {
+        let history = vec![
+            ChatMessage::user("turn 1"),
+            ChatMessage::assistant("reply 1"),
+            ChatMessage::user("turn 2"),
+            ChatMessage::assistant("reply 2"),
+            ChatMessage::user("turn 3"),
+        ];
+
+        // With a system prompt: it is always messages[0] and survives trimming
+        // even at max_turns=1 (system + 1 user/assistant pair only).
+        let messages = build_request_messages(&history, "turn 3", Some("Be terse."), 1);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[0].content, "Be terse.");
+
+        // Without a system prompt: plain history + user turn, no system role.
+        let messages = build_request_messages(&history, "hi", None, 10);
+        assert_eq!(messages.len(), 6);
+        assert_ne!(messages[0].role, "system");
+
+        // The system role survives serialization on the request body.
+        let json = serde_json::to_string(&messages).unwrap();
+        assert!(!json.contains("\"role\":\"system\""));
+        let messages = build_request_messages(&history, "hi", Some("Be terse."), 1);
+        let json = serde_json::to_string(&messages).unwrap();
+        assert!(json.contains("\"role\":\"system\""));
     }
 }
