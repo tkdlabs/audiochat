@@ -3,6 +3,7 @@
 pub mod audio_sink;
 pub mod capture;
 pub mod config;
+pub mod conversation;
 pub mod markdown;
 pub mod pipeline;
 pub mod resample;
@@ -15,6 +16,7 @@ pub use traits::{Llm, LlmResponse, LlmStream, LlmStreamItem, SpeechRecognizer, T
 pub use audio_sink::AudioSink;
 pub use capture::MicCapture;
 pub use config::AudioConfig;
+pub use conversation::ConversationLogger;
 pub use markdown::strip_markdown;
 pub use pipeline::{Pipeline, TurnTiming};
 pub use resample::LinearResampler;

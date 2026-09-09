@@ -147,6 +147,15 @@ it drops a too-short utterance — useful for tuning `--vad-threshold` and
 `AUDIOCHAT_LLM_URL`); flags take precedence. `--s2s` handles Ctrl-C gracefully,
 shutting down the capture thread and stopping playback before exit.
 
+`--conversation-log conversations.jsonl` (env `AUDIOCHAT_CONVERSATION_LOG`) is a
+structured conversation log: after every completed turn the question, reply,
+model, and timing breakdown are appended as a single JSON line (JSONL). Each
+record looks like:
+
+```json
+{"timestamp":1786326794,"turn":0,"model":"gemma4:e2b","user":"What time is it?","assistant":"It's about 3:20 PM.","timing":{"stt_ms":120,"first_token_ms":180,"first_audio_ms":420,"stream_ms":650,"total_ms":1100}}
+```
+
 Markdown in LLM replies is stripped to plain text before synthesis, so Piper
 doesn't read out `###`, `*`, backticks, etc.
 

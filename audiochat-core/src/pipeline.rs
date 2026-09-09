@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use crate::audio_sink::AudioSink;
 use crate::config::AudioConfig;
+use crate::conversation::ConversationLogger;
 use crate::traits::{Llm, TextToSpeech};
 
 /// Minimum characters before a clause boundary (comma, etc.) triggers a flush,
@@ -132,6 +133,9 @@ pub struct Pipeline {
     /// Shared flag set by the capture thread when the user speaks during
     /// playback, requesting that the current reply be interrupted (barge-in).
     barge: Option<Arc<AtomicBool>>,
+    /// Optional conversation log writer. Each completed turn is appended as a
+    /// single JSON line when enabled.
+    conversation_log: Option<ConversationLogger>,
 }
 
 impl Pipeline {
@@ -145,6 +149,7 @@ impl Pipeline {
             verbose: false,
             gate: None,
             barge: None,
+            conversation_log: None,
         }
     }
 
@@ -159,6 +164,13 @@ impl Pipeline {
     /// speaks over playback; the pipeline polls it to stop the current reply.
     pub fn with_barge(mut self, barge: Option<Arc<AtomicBool>>) -> Self {
         self.barge = barge;
+        self
+    }
+
+    /// Attach a conversation logger. When present, each completed turn is
+    /// appended as a JSON line to the log file.
+    pub fn with_conversation_log(mut self, log: Option<ConversationLogger>) -> Self {
+        self.conversation_log = log;
         self
     }
 
@@ -271,8 +283,8 @@ impl Pipeline {
         if !reply.is_empty() {
             println!();
         }
+        timing.total_ms = start.elapsed().as_millis() as u64;
         if self.verbose && !reply.is_empty() {
-            timing.total_ms = start.elapsed().as_millis() as u64;
             timing.print();
         }
 
@@ -293,6 +305,20 @@ impl Pipeline {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             self.set_gate(false);
+        }
+        if let Some(log) = &mut self.conversation_log {
+            log.log(
+                self.llm.model(),
+                question,
+                &reply,
+                crate::conversation::Timing {
+                    stt_ms: timing.stt_ms,
+                    first_token_ms: timing.first_token_ms,
+                    first_audio_ms: timing.first_audio_ms,
+                    stream_ms: timing.full_stream_ms,
+                    total_ms: timing.total_ms,
+                },
+            );
         }
         Ok(did_reply.then_some(reply))
     }
@@ -382,6 +408,10 @@ mod tests {
                 stream: None,
                 full: String::new(),
             })
+        }
+
+        fn model(&self) -> &str {
+            "noop"
         }
     }
 

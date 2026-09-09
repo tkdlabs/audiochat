@@ -249,6 +249,10 @@ impl Llm for Ollama {
             full: String::new(),
         })
     }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 /// Lazily parses the newline-delimited Ollama `/api/chat` stream into text

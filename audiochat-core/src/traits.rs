@@ -34,4 +34,7 @@ pub struct LlmResponse {
 pub trait Llm {
     /// Send a prompt and return a (streaming) response.
     fn generate(&self, prompt: &str) -> Result<LlmResponse, Box<dyn Error + Send + Sync>>;
+
+    /// The model this client is configured for.
+    fn model(&self) -> &str;
 }

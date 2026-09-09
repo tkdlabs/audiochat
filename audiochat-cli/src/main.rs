@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use audiochat_core::{
-    AudioConfig, AudioSink, EnergyVad, Llm, MicCapture, Pipeline, Session, SpeechRecognizer,
-    TextToSpeech,
+    AudioConfig, AudioSink, ConversationLogger, EnergyVad, Llm, MicCapture, Pipeline, Session,
+    SpeechRecognizer, TextToSpeech,
 };
 use audiochat_llm::Ollama;
 use audiochat_stt_whisper::WhisperRecognizer;
@@ -47,6 +47,8 @@ Options:
   --barge-threshold F RMS threshold (0..1) that triggers barge-in (default 0.06).
                       Raise if the assistant interrupts itself; lower if it misses
                       a deliberate stop.
+  --conversation-log F Write each turn as a JSON line to F (JSONL).
+                      AUDIOCHAT_CONVERSATION_LOG is the env fallback.
   -v, --verbose       Print per-turn latency metrics in --s2s.
   --silent            In --s2s, print replies but do not speak them.
   -h, --help          Show this help.
@@ -78,6 +80,7 @@ struct Opts {
     vad_silence_ms: Option<u64>,
     barge_in: bool,
     barge_threshold: Option<f32>,
+    conversation_log: Option<String>,
     system_prompt: Option<String>,
 }
 
@@ -116,6 +119,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut vad_silence_ms: Option<u64> = None;
     let mut barge_in = false;
     let mut barge_threshold: Option<f32> = None;
+    let mut conversation_log: Option<String> = None;
     let mut system_prompt: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -212,6 +216,11 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 }
                 barge_threshold = Some(v);
             }
+            "--conversation-log" => {
+                i += 1;
+                let p = args.get(i).ok_or("--conversation-log requires a path")?;
+                conversation_log = Some(p.clone());
+            }
             "--system-prompt" => {
                 i += 1;
                 let p = args.get(i).ok_or("--system-prompt requires a value")?;
@@ -247,6 +256,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         vad_silence_ms,
         barge_in,
         barge_threshold,
+        conversation_log: opt_or_env(conversation_log, "AUDIOCHAT_CONVERSATION_LOG"),
         system_prompt: opt_or_env(system_prompt, "AUDIOCHAT_SYSTEM_PROMPT"),
     })
 }
@@ -365,6 +375,11 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     let mut pipeline = Pipeline::new(llm, tts);
     pipeline.speak_replies = !opts.silent;
     pipeline.verbose = opts.verbose;
+    if let Some(path) = &opts.conversation_log {
+        let logger = ConversationLogger::open(std::path::Path::new(path))
+            .map_err(|e| format!("failed to open conversation log {path}: {e}"))?;
+        pipeline = pipeline.with_conversation_log(Some(logger));
+    }
     let mic = MicCapture::start_with_device(AudioConfig::default(), opts.device.as_deref())?;
 
     let mut session = Session::new();
