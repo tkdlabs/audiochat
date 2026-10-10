@@ -42,6 +42,8 @@ Options:
   --tts-python PATH   Python interpreter with piper-tts installed (default: python3).
   --tts-url URL       audio.cpp base URL (default: http://localhost:8080).
   --tts-voice NAME    audio.cpp voice/speaker id (default: Serena).
+  --tts-instruct TEXT audiocpp style/emotion/pacing instruction, e.g. speak
+                      softly and slowly (Qwen3-TTS CustomVoice/VoiceDesign).
   --llm-provider NAME LLM backend: ollama (default), openai, or opencode-go.
   --llm-model NAME    Model name (Ollama model, or OpenAI-compatible model id).
   --llm-url URL       Base URL (Ollama: http://localhost:11434; opencode-go:
@@ -107,6 +109,7 @@ Environment (flag takes precedence):
   AUDIOCHAT_TTS_MODEL     piper voice path, or audiocpp server model id
   AUDIOCHAT_TTS_URL       audio.cpp base URL
   AUDIOCHAT_TTS_VOICE     audio.cpp voice id
+  AUDIOCHAT_TTS_INSTRUCT  audiocpp style/emotion instruction
   AUDIOCHAT_PYTHON        python interpreter for piper (default python3)
   AUDIOCHAT_LLM_PROVIDER  llm backend: ollama, openai, or opencode-go
   AUDIOCHAT_LLM_MODEL     model name
@@ -129,6 +132,7 @@ struct Opts {
     tts_model: Option<PathBuf>,
     tts_url: Option<String>,
     tts_voice: Option<String>,
+    tts_instruct: Option<String>,
     tts_python: Option<String>,
     prompt: Option<String>,
     llm_provider: Option<String>,
@@ -200,6 +204,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut tts_model: Option<PathBuf> = None;
     let mut tts_url: Option<String> = None;
     let mut tts_voice: Option<String> = None;
+    let mut tts_instruct: Option<String> = None;
     let mut tts_python: Option<String> = None;
     let mut prompt: Option<String> = None;
     let mut llm_provider: Option<String> = None;
@@ -328,6 +333,11 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 let v = args.get(i).ok_or("--tts-voice requires a value")?;
                 tts_voice = Some(v.clone());
             }
+            "--tts-instruct" => {
+                i += 1;
+                let t = args.get(i).ok_or("--tts-instruct requires text")?;
+                tts_instruct = Some(t.clone());
+            }
             "--tts-python" => {
                 i += 1;
                 let p = args.get(i).ok_or("--tts-python requires a path")?;
@@ -437,6 +447,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
             .or_else(|| std::env::var("AUDIOCHAT_TTS_MODEL").ok().map(PathBuf::from)),
         tts_url: opt_or_env(tts_url, "AUDIOCHAT_TTS_URL"),
         tts_voice: opt_or_env(tts_voice, "AUDIOCHAT_TTS_VOICE"),
+        tts_instruct: opt_or_env(tts_instruct, "AUDIOCHAT_TTS_INSTRUCT"),
         tts_python: opt_or_env(tts_python, "AUDIOCHAT_PYTHON"),
         prompt,
         llm_provider: opt_or_env(llm_provider, "AUDIOCHAT_LLM_PROVIDER"),
@@ -621,7 +632,9 @@ fn build_tts(
                 .clone()
                 .unwrap_or_else(|| DEFAULT_AUDIOCPP_VOICE.to_string());
             Ok(Box::new(
-                AudioCppTts::with_base(base, model).with_voice(voice),
+                AudioCppTts::with_base(base, model)
+                    .with_voice(voice)
+                    .with_instruct(opts.tts_instruct.clone()),
             ))
         }
         other => {

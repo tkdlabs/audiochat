@@ -3,9 +3,10 @@
 //! Usage:
 //!   cargo run -p audiochat-tts-audiocpp --example audiocpp_tts -- "some text"
 //! Environment:
-//!   AUDIOCHAT_TTS_URL    audio.cpp base URL (default: http://localhost:8080)
-//!   AUDIOCHAT_TTS_MODEL  server-side model id (default: qwen3-tts)
-//!   AUDIOCHAT_TTS_VOICE  server-side voice id (default: Serena)
+//!   AUDIOCHAT_TTS_URL       audio.cpp base URL (default: http://localhost:8080)
+//!   AUDIOCHAT_TTS_MODEL     server-side model id (default: qwen3-tts)
+//!   AUDIOCHAT_TTS_VOICE     server-side voice id (default: Serena)
+//!   AUDIOCHAT_TTS_INSTRUCT  style/emotion/pacing instruction (optional)
 
 use std::error::Error;
 
@@ -24,8 +25,11 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .unwrap_or_else(|_| "http://localhost:8080".to_string());
     let model = std::env::var("AUDIOCHAT_TTS_MODEL").unwrap_or_else(|_| "qwen3-tts".to_string());
     let voice = std::env::var("AUDIOCHAT_TTS_VOICE").unwrap_or_else(|_| "Serena".to_string());
+    let instruct = std::env::var("AUDIOCHAT_TTS_INSTRUCT").ok();
 
-    let mut tts = AudioCppTts::with_base(base, model).with_voice(voice);
+    let mut tts = AudioCppTts::with_base(base, model)
+        .with_voice(voice)
+        .with_instruct(instruct);
     let pcm = tts.synthesize(&text)?;
     eprintln!(
         "synthesized {} samples ({} ms) at 16 kHz",

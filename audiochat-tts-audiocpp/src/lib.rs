@@ -29,6 +29,7 @@ pub struct AudioCppTts {
     model: String,
     voice: String,
     speed: Option<f32>,
+    instruct: Option<String>,
     client: ureq::Agent,
 }
 
@@ -40,6 +41,11 @@ struct SpeechRequest<'a> {
     voice: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     speed: Option<f32>,
+    /// Style/emotion/pacing instruction. audio.cpp maps the top-level
+    /// `instructions` field onto the model's `instruction` request option
+    /// (Qwen3-TTS CustomVoice and VoiceDesign consume it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -71,6 +77,7 @@ impl AudioCppTts {
             model: model.into(),
             voice: DEFAULT_VOICE.to_string(),
             speed: None,
+            instruct: None,
             client,
         }
     }
@@ -84,6 +91,15 @@ impl AudioCppTts {
     /// Set a speech-rate multiplier. `None` uses the model default.
     pub fn with_speed(mut self, speed: Option<f32>) -> Self {
         self.speed = speed.filter(|s| *s > 0.0);
+        self
+    }
+
+    /// Set a natural-language style/emotion/pacing instruction (e.g. "Speak
+    /// softly and slowly"). Blank values are ignored. Only models that accept
+    /// an instruction (Qwen3-TTS CustomVoice/VoiceDesign) act on it; audio.cpp
+    /// ignores it for other families.
+    pub fn with_instruct(mut self, instruct: Option<String>) -> Self {
+        self.instruct = instruct.filter(|s| !s.trim().is_empty());
         self
     }
 
@@ -113,6 +129,7 @@ impl TextToSpeech for AudioCppTts {
             input: text,
             voice: &self.voice,
             speed: self.speed,
+            instructions: self.instruct.as_deref(),
         };
 
         let resp = self
@@ -251,5 +268,40 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0], 2000);
         assert_eq!(out[1], 2000);
+    }
+
+    #[test]
+    fn request_sends_instruction_as_instructions() {
+        let body = SpeechRequest {
+            model: "qwen3-tts",
+            input: "hi",
+            voice: "serena",
+            speed: None,
+            instructions: Some("Speak slowly and warmly."),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"instructions\":\"Speak slowly and warmly.\""));
+        // Absent optional fields are omitted entirely.
+        assert!(!json.contains("speed"));
+    }
+
+    #[test]
+    fn request_omits_instructions_when_unset() {
+        let body = SpeechRequest {
+            model: "qwen3-tts",
+            input: "hi",
+            voice: "serena",
+            speed: Some(1.0),
+            instructions: None,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(!json.contains("instructions"));
+    }
+
+    #[test]
+    fn with_instruct_ignores_blank() {
+        let engine = AudioCppTts::with_base("http://h", "qwen3-tts")
+            .with_instruct(Some("   ".into()));
+        assert!(engine.instruct.is_none());
     }
 }

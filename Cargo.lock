@@ -96,6 +96,7 @@ dependencies = [
  "audiochat-core",
  "hound",
  "serde",
+ "serde_json",
  "ureq",
 ]
 

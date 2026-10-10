@@ -60,6 +60,9 @@ pub struct TtsTemplate {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<String>,
+    /// audiocpp style/emotion/pacing instruction (Qwen3-TTS CustomVoice/VoiceDesign).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruct: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,6 +174,7 @@ impl TtsTemplate {
         fill(&mut self.backend, other.backend.as_ref());
         fill(&mut self.model, other.model.as_ref());
         fill(&mut self.voice, other.voice.as_ref());
+        fill(&mut self.instruct, other.instruct.as_ref());
         fill(&mut self.url, other.url.as_ref());
         fill(&mut self.python, other.python.as_ref());
     }
@@ -301,6 +305,7 @@ impl Template {
         fill(&mut opts.tts_backend, self.tts.backend.as_ref());
         fill(&mut opts.tts_url, self.tts.url.as_ref());
         fill(&mut opts.tts_voice, self.tts.voice.as_ref());
+        fill(&mut opts.tts_instruct, self.tts.instruct.as_ref());
         fill(&mut opts.tts_python, self.tts.python.as_ref());
         if let Some(model) = &self.tts.model {
             if opts.tts_model.is_none() {
@@ -394,6 +399,7 @@ impl Template {
             ),
             model: opts.tts_model.as_ref().map(|p| p.display().to_string()),
             voice: opts.tts_voice.clone(),
+            instruct: opts.tts_instruct.clone(),
             url: opts.tts_url.clone(),
             python: opts.tts_python.clone(),
         };
@@ -619,5 +625,16 @@ mod tests {
         assert_eq!(template.stt.url.as_deref(), Some("http://gpu:8080"));
         assert_eq!(template.tts.voice.as_deref(), Some("Kept"));
         assert_eq!(template.tts.model.as_deref(), Some("qwen3-tts"));
+    }
+
+    #[test]
+    fn tts_instruct_round_trips_via_template() {
+        let opts =
+            crate::parse_args(&["--tts-instruct".into(), "Speak slowly".into()]).unwrap();
+        let template = Template::from_opts(&opts);
+        assert_eq!(template.tts.instruct.as_deref(), Some("Speak slowly"));
+        let mut restored = crate::parse_args(&[]).unwrap();
+        template.apply_to_opts(&mut restored);
+        assert_eq!(restored.tts_instruct.as_deref(), Some("Speak slowly"));
     }
 }

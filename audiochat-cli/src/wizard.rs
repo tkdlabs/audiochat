@@ -169,6 +169,7 @@ fn ask_tts(baseline: &TtsTemplate) -> Result<TtsTemplate, InquireError> {
             backend: Some("piper".into()),
             model: Some(model),
             voice: None,
+            instruct: None,
             url: None,
             python: Some(python),
         })
@@ -193,10 +194,15 @@ fn ask_tts(baseline: &TtsTemplate) -> Result<TtsTemplate, InquireError> {
             Some(DEFAULT_AUDIOCPP_VOICE),
             "built-in voices for the selected model",
         )?;
+        let instruct = text_optional(
+            "Style/emotion instruction (blank = none):",
+            baseline.instruct.as_deref(),
+        )?;
         Ok(TtsTemplate {
             backend: Some("audiocpp".into()),
             model: Some(model),
             voice: Some(voice),
+            instruct,
             url: Some(url),
             python: None,
         })

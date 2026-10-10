@@ -231,6 +231,12 @@ cargo run -p audiochat-tts-audiocpp --example audiocpp_tts -- "Text to a wav fil
 `AUDIOCHAT_TTS_MODEL`) is the server-side model id. The server returns 24 kHz
 WAV; audiochat decodes it and resamples to the pipeline's 16 kHz mono.
 
+Pass `--tts-instruct "Speak softly and a little slower"` (env
+`AUDIOCHAT_TTS_INSTRUCT`) to steer style, emotion, and pacing. It is sent as the
+`instructions` field of `POST /v1/audio/speech`, which audio.cpp maps to the
+model's `instruction` request option; the Qwen3-TTS CustomVoice and VoiceDesign
+variants honor it, other families ignore it:
+
 ## LLM (Ollama)
 
 The LLM backend is pluggable; the Ollama client talks to the streaming

@@ -32,8 +32,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let tts_model =
         std::env::var("AUDIOCHAT_TTS_MODEL").unwrap_or_else(|_| "qwen3-tts".to_string());
     let voice = std::env::var("AUDIOCHAT_TTS_VOICE").unwrap_or_else(|_| "Serena".to_string());
-    let tts: Box<dyn TextToSpeech> =
-        Box::new(AudioCppTts::with_base(base, tts_model).with_voice(voice));
+    let instruct = std::env::var("AUDIOCHAT_TTS_INSTRUCT").ok();
+    let tts: Box<dyn TextToSpeech> = Box::new(
+        AudioCppTts::with_base(base, tts_model)
+            .with_voice(voice)
+            .with_instruct(instruct),
+    );
 
     let mut pipeline = Pipeline::new(Box::new(llm) as Box<dyn Llm>, tts);
     pipeline.speak_replies = false;
