@@ -3,8 +3,8 @@
 //! [audio.cpp](https://github.com/0xShug0/audio.cpp) exposes an
 //! `audiocpp_server` with `POST /v1/audio/speech` returning a WAV. This backend
 //! sends text there, decodes the WAV, downmixes to mono, and resamples to the
-//! pipeline's 16 kHz mono i16 format. Running the model on a GPU host (e.g.
-//! `http://localhost:8080`) keeps TTS very fast and off the local box.
+//! pipeline's 16 kHz mono i16 format. Running the model on a GPU host keeps TTS
+//! very fast and off the local box; pass its URL to `with_base`.
 
 use std::error::Error;
 use std::fmt;
@@ -14,7 +14,7 @@ use std::time::Duration;
 use audiochat_core::{LinearResampler, TextToSpeech};
 use serde::Serialize;
 
-/// Default audio.cpp server base URL.
+/// Default audio.cpp server base URL (override with `with_base`).
 const DEFAULT_BASE: &str = "http://localhost:8080";
 /// Default server-side model id (a Qwen3-TTS CustomVoice model).
 const DEFAULT_MODEL: &str = "qwen3-tts";

@@ -14,7 +14,7 @@ use std::time::Duration;
 use audiochat_core::SpeechRecognizer;
 use serde::Deserialize;
 
-/// Default audio.cpp server base URL.
+/// Default audio.cpp server base URL (override with `with_base`).
 const DEFAULT_BASE: &str = "http://localhost:8080";
 /// Default server-side ASR model id (fast English streaming model).
 const DEFAULT_MODEL: &str = "moonshine-asr";

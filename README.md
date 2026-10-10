@@ -56,10 +56,11 @@ cargo run -p audiochat-cli -- --device "C920" models/ggml-tiny.en.bin
 
 Instead of local whisper, STT can run on an [audio.cpp](https://github.com/0xShug0/audio.cpp)
 GPU host via its OpenAI-compatible `POST /v1/audio/transcriptions`. Select it
-with `--stt-backend audiocpp`; the default server is
-`http://localhost:8080` with model `moonshine-asr` (Moonshine
-Streaming Tiny — English, and very fast). Use `--stt-model nemotron-asr`
-(Nemotron 3.5 ASR Streaming 0.6B) for multilingual recognition.
+with `--stt-backend audiocpp`; point it at your server with `--stt-url` (or
+`AUDIOCHAT_STT_URL`, or the [config file](#defaults)). The built-in fallback is
+`http://localhost:8080` with model `moonshine-asr` (Moonshine Streaming Tiny —
+English, and very fast). Use `--stt-model nemotron-asr` (Nemotron 3.5 ASR
+Streaming 0.6B) for multilingual recognition.
 
 ```
 # Live mic -> text using the remote GPU STT:
@@ -112,6 +113,36 @@ Loading a template that configures STT, TTS, and an LLM enables `--s2s`
 automatically, so the wizard-built and full-stack templates run the whole loop;
 an explicit `--prompt`/`--speak` still overrides.
 
+## Defaults
+
+Machine-specific values — server hosts, model ids, voice, default device — live
+in a global defaults file rather than in the source, so the repository carries
+no private endpoints. It is `~/.config/audiochat/config.json` (same root as
+templates; override with `AUDIOCHAT_CONFIG_DIR` or `XDG_CONFIG_HOME`) and uses
+the template JSON shape:
+
+```json
+{
+  "stt": { "backend": "audiocpp", "url": "http://gpu-host:8080", "model": "moonshine-asr" },
+  "tts": { "backend": "audiocpp", "url": "http://gpu-host:8080", "model": "qwen3-tts", "voice": "Serena" },
+  "llm": { "provider": "opencode-go", "model": "deepseek-v4.1-flash" }
+}
+```
+
+Write it from the current flags/env with `--save-config`:
+
+```
+cargo run -p audiochat-cli -- --save-config \
+  --stt-backend audiocpp --stt-url http://gpu-host:8080 \
+  --tts-backend audiocpp --tts-url http://gpu-host:8080
+```
+
+Precedence, lowest to highest: built-in fallbacks → this config file → a loaded
+template → `AUDIOCHAT_*` environment variables → explicit CLI flags. So defaults
+apply automatically, and any of the more specific layers still overrides them.
+The config file is read on every run but, like `--save-template`, writing it
+alone does not open the mic.
+
 ## Quick start (full speech-to-speech)
 
 Talk to it end to end using the fast remote backends: [audio.cpp](#stt-audiocpp-remotefast)
@@ -129,8 +160,10 @@ cargo run --release -p audiochat-cli -- --s2s \
 Notes:
 
 - Use `--release`; a debug build adds noticeable latency.
-- All three backends default to the `localhost` host (STT/TTS on port
-  8080) and OpenCode Go's API; no local model files are needed.
+- The remote STT/TTS hosts fall back to `http://localhost:8080` (set yours with
+  `--stt-url`/`--tts-url`, the matching env vars, or the
+  [config file](#defaults)) and the LLM uses OpenCode Go's API; no local model
+  files are needed.
 - The OpenCode Go key is read automatically from
   `~/.local/share/opencode/auth.json` (or set `OPENCODE_API_KEY` /
   `AUDIOCHAT_LLM_API_KEY`). It runs DeepSeek V4.1 Flash in non-thinking mode.
@@ -178,9 +211,10 @@ AUDIOCHAT_PYTHON=$PWD/.venv/bin/python \
 
 For lower-latency synthesis you can run [audio.cpp](https://github.com/0xShug0/audio.cpp)
 on a GPU host and point audiochat at its OpenAI-compatible speech endpoint
-(`POST /v1/audio/speech`). Select it with `--tts-backend audiocpp`; the default
-server is `http://localhost:8080` with model `qwen3-tts` and voice
-`Serena`.
+(`POST /v1/audio/speech`). Select it with `--tts-backend audiocpp`; point it at
+your server with `--tts-url` (or `AUDIOCHAT_TTS_URL`, or the
+[config file](#defaults)). The built-in fallback is `http://localhost:8080`
+with model `qwen3-tts` and voice `Serena`.
 
 ```
 # Speak text via a remote audio.cpp server:

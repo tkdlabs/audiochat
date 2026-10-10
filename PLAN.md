@@ -175,12 +175,12 @@ Two opt-in backends were added without changing the pipeline or the defaults
 - **`audiochat-tts-audiocpp`**: an `AudioCppTts` backend that POSTs to an
   [audio.cpp](https://github.com/0xShug0/audio.cpp) server's
   `/v1/audio/speech`, decodes the returned WAV, downmixes to mono and resamples
-  to 16 kHz. Defaults target `http://localhost:8080` (`qwen3-tts`,
-  voice `Serena`); it also works with any remote host via `--tts-url`.
+  to 16 kHz. The host is configured per machine (`--tts-url`, the config file, or
+  `with_base`); defaults are model `qwen3-tts`, voice `Serena`.
 - **`audiochat-stt-audiocpp`**: an `AudioCppStt` backend that uploads a completed
   utterance as a WAV to audio.cpp's OpenAI-compatible
-  `/v1/audio/transcriptions` (multipart), returning the transcript. Defaults
-  target `http://localhost:8080` (`nemotron-asr`), offloading STT from
+  `/v1/audio/transcriptions` (multipart), returning the transcript. The host is
+  configured per machine (`--stt-url` or the config file), offloading STT from
   local whisper to a GPU host. The server's streaming
   `/v1/audio/transcriptions/live` endpoint is available for a future streaming
   recognizer.
@@ -188,9 +188,9 @@ Two opt-in backends were added without changing the pipeline or the defaults
 CLI: `--llm-provider ollama|openai|opencode-go`, `--llm-api-key`,
 `--llm-thinking`; `--tts-backend piper|audiocpp`, `--tts-url`, `--tts-voice`;
 `--stt-backend whisper|audiocpp`, `--stt-url`, `--stt-model`, `--stt-language`
-(all with `AUDIOCHAT_*` env fallbacks). Verified live against OpenCode Go
-(DeepSeek V4.1 Flash, non-thinking) and an audio.cpp CUDA server on the gpu
-host.
+(all with `AUDIOCHAT_*` env fallbacks, and a `~/.config/audiochat/config.json`
+defaults file). Verified live against OpenCode Go (DeepSeek V4.1 Flash,
+non-thinking) and an audio.cpp CUDA server on a remote GPU host.
 
 ### Turn-taking ergonomics ✅
 

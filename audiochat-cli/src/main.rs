@@ -1,6 +1,7 @@
 //! audiochat CLI: speech-to-text (default), TTS test (`--speak`), LLM test
 //! (`--prompt`), or full speech-to-speech (`--s2s`).
 
+mod config;
 mod discover;
 mod template;
 mod wizard;
@@ -88,6 +89,12 @@ Templates:
   Templates live in ~/.config/audiochat/templates/ (override with
   AUDIOCHAT_CONFIG_DIR or XDG_CONFIG_HOME).
 
+Defaults:
+  --save-config       Save the current options as global defaults (hosts, model
+                      ids, voice) to ~/.config/audiochat/config.json. These are
+                      loaded automatically and are the lowest-priority layer,
+                      below flags, environment variables, and templates.
+
   -h, --help          Show this help.
 
 Environment (flag takes precedence):
@@ -150,6 +157,7 @@ struct Opts {
     edit_template: Option<String>,
     list_templates: bool,
     delete_template: Option<String>,
+    save_config: bool,
 }
 
 /// Resolve a CLI flag value, falling back to an environment variable.
@@ -220,6 +228,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut edit_template: Option<String> = None;
     let mut list_templates = false;
     let mut delete_template: Option<String> = None;
+    let mut save_config = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -405,6 +414,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 let n = args.get(i).ok_or("--delete-template requires a name")?;
                 delete_template = Some(n.clone());
             }
+            "--save-config" => save_config = true,
             "--help" | "-h" => return Err(USAGE.to_string()),
             flag if flag.starts_with('-') => {
                 return Err(format!("unknown option: {flag}\n{USAGE}"))
@@ -455,6 +465,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         edit_template,
         list_templates,
         delete_template,
+        save_config,
     })
 }
 
@@ -805,6 +816,22 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if !has_explicit_mode(&opts) && loaded.effective_mode() == Some("s2s") {
             opts.s2s = true;
             eprintln!("audiochat: template '{name}' -> speech-to-speech mode (--s2s)");
+        }
+    }
+
+    // Global defaults (hosts, model ids, voice) from the config file are the
+    // lowest-priority layer: flags, env, and templates already filled their
+    // fields, so this only supplies what is still unset.
+    if let Some(defaults) = config::load_defaults()? {
+        defaults.apply_to_opts(&mut opts);
+    }
+
+    if opts.save_config {
+        let path = config::save_defaults(&template::Template::from_opts(&opts))?;
+        println!("saved defaults to {}", path.display());
+        // Persisting defaults shouldn't start capturing from the mic.
+        if !opts.s2s && opts.prompt.is_none() && opts.speak.is_none() {
+            return Ok(());
         }
     }
 
