@@ -28,13 +28,25 @@ struct Turn<'a> {
     timing: Timing,
 }
 
-/// Per-turn latency, in milliseconds, included in each JSON record.
+/// Per-turn latency, in milliseconds, included in each JSON record. All values
+/// are relative to the true end of the user's speech.
 #[derive(Serialize)]
 pub struct Timing {
+    /// VAD trailing-silence window before the utterance was cut.
+    pub vad_ms: u64,
+    /// Speech-recognition inference time.
     pub stt_ms: u64,
+    /// End of speech -> turn dispatched (VAD window + endpointer hold + STT).
+    pub endpoint_ms: u64,
+    /// End of speech -> first LLM token.
     pub first_token_ms: u64,
+    /// First TTS synthesis call duration.
+    pub tts_first_ms: u64,
+    /// End of speech -> first audio enqueued.
     pub first_audio_ms: u64,
+    /// End of speech -> last token.
     pub stream_ms: u64,
+    /// End of speech -> last audio enqueued.
     pub total_ms: u64,
 }
 
@@ -89,8 +101,11 @@ mod tests {
             std::env::temp_dir().join(format!("audiochat-test-{}.jsonl", std::process::id()));
         let mut logger = ConversationLogger::open(&path).unwrap();
         let timing = Timing {
+            vad_ms: 600,
             stt_ms: 90,
+            endpoint_ms: 640,
             first_token_ms: 120,
+            tts_first_ms: 180,
             first_audio_ms: 250,
             stream_ms: 400,
             total_ms: 900,
@@ -109,6 +124,7 @@ mod tests {
         assert_eq!(v["user"], "Hello");
         assert_eq!(v["assistant"], "Hi there!");
         assert_eq!(v["timing"]["stt_ms"], 90);
+        assert_eq!(v["timing"]["tts_first_ms"], 180);
         assert_eq!(v["turn"], 0);
         let _ = std::fs::remove_file(&path);
     }

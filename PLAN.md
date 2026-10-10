@@ -88,8 +88,8 @@ Status: `audiochat-llm` crate with `Ollama` backend using ureq (sync, small foot
 against Ollama's `/api/generate` streaming endpoint. CLI `--prompt "<text>" --llm-model <name>`
 mode streams the reply token-by-token. Tested with `gemma4:e2b` on localhost.
 
-Remaining: OpenAI-compatible backend (trivial swap). Multi-turn conversation
-context landed later (see M4 planning note).
+Remaining: ~~OpenAI-compatible backend~~ done in iteration 2 (see below).
+Multi-turn conversation context landed later (see M4 planning note).
 
 ### M4 — Integration: end-to-end speech-to-speech  ✅
 - Wire M1+M2+M3 through the pipeline
@@ -113,9 +113,14 @@ s2s loop on real hardware.
 - Config via env or a small config file (backend URL, model, device)
 - Clean shutdown / resource release
 
-Status: `Pipeline` records a `TurnTiming` per spoken turn (STT, first-token,
-first-audio, full-stream, total latencies) printed to stderr when `--verbose` is
-on. Transient LLM/TTS failures retry with
+Status: `Pipeline` records a `TurnTiming` per spoken turn, printed to stderr when
+`--verbose` is on. Timing is broken out per layer, all measured from the true end
+of the user's speech: `vad_ms` (VAD silence window), `stt_ms` (recognition),
+`endpoint_ms` (end of speech → dispatch), `first_token_ms` (LLM TTFT),
+`tts_first_ms` (first TTS call), `first_audio_ms`, `full_stream_ms`, `total_ms`;
+the same fields go to the conversation log. A mic-free benchmark
+(`cargo run -p audiochat-cli --example latency -- "..."`) exercises the
+LLM→TTS pipeline. Transient LLM/TTS failures retry with
 exponential backoff (`with_retry`). CLI options read `AUDIOCHAT_*` env vars as
 fallbacks (flag takes precedence). Graceful SIGINT shutdown in `--s2s` sets a
 stop flag read by the `Session` loop; it shuts down the background capture
@@ -153,3 +158,49 @@ the session.
 Barge-in (interrupting an in-progress reply by speaking) is implemented as an
 opt-in `--barge-in` mode; it still assumes headphones/earbuds since echo
 cancellation remains out of scope.
+
+## Iteration 2 — OpenAI-compatible LLM + audio.cpp TTS ✅
+
+Two opt-in backends were added without changing the pipeline or the defaults
+(Ollama + Piper remain the out-of-the-box choices):
+
+- **`OpenAiCompatible` LLM client** (`audiochat-llm`): talks to any OpenAI-style
+  `/chat/completions` server, streaming SSE deltas and keeping the same bounded
+  multi-turn history as `Ollama`. Reasoning models are run in non-thinking mode
+  by default via `{"thinking": {"type": "disabled"}}`. A `--llm-provider
+  opencode-go` preset targets the OpenCode Go subscription
+  (`https://opencode.ai/zen/go/v1`, `deepseek-v4.1-flash`); the API key resolves
+  from `AUDIOCHAT_LLM_API_KEY` / `OPENCODE_API_KEY` / opencode's `auth.json`.
+  Shared history helpers were factored into `audiochat-llm::chat`.
+- **`audiochat-tts-audiocpp`**: an `AudioCppTts` backend that POSTs to an
+  [audio.cpp](https://github.com/0xShug0/audio.cpp) server's
+  `/v1/audio/speech`, decodes the returned WAV, downmixes to mono and resamples
+  to 16 kHz. Defaults target `http://localhost:8080` (`qwen3-tts`,
+  voice `Serena`); it also works with any remote host via `--tts-url`.
+- **`audiochat-stt-audiocpp`**: an `AudioCppStt` backend that uploads a completed
+  utterance as a WAV to audio.cpp's OpenAI-compatible
+  `/v1/audio/transcriptions` (multipart), returning the transcript. Defaults
+  target `http://localhost:8080` (`nemotron-asr`), offloading STT from
+  local whisper to a GPU host. The server's streaming
+  `/v1/audio/transcriptions/live` endpoint is available for a future streaming
+  recognizer.
+
+CLI: `--llm-provider ollama|openai|opencode-go`, `--llm-api-key`,
+`--llm-thinking`; `--tts-backend piper|audiocpp`, `--tts-url`, `--tts-voice`;
+`--stt-backend whisper|audiocpp`, `--stt-url`, `--stt-model`, `--stt-language`
+(all with `AUDIOCHAT_*` env fallbacks). Verified live against OpenCode Go
+(DeepSeek V4.1 Flash, non-thinking) and an audio.cpp CUDA server on the gpu
+host.
+
+### Turn-taking ergonomics ✅
+
+- The endpointer hold is decoupled from the VAD candidate window: `--pause`
+  (env `AUDIOCHAT_PAUSE`) sets how long a mid-sentence transcript is held,
+  independent of `--vad-silence`. It is backed by an `AtomicU64` so it can be
+  changed while running.
+- A stdin **control console** (only when stdin is a terminal) tunes the pause
+  live (`+`/`-`/`pause <ms>`) and stops playback (`stop`) without restarting.
+- A spoken **stop word** (`--stop-word`, default `stop`) finalizes the current
+  turn immediately instead of waiting out the pause, or submits a held question;
+  the word is never sent to the LLM. A genuine question ending in the word is
+  left intact. With `--barge-in`, the same word interrupts a spoken reply.

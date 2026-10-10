@@ -8,6 +8,10 @@ target/
 # Models
 models/
 
+# Model artifacts downloaded to the repo root
+*.gguf
+*.dl.log
+
 # Test output artifacts
 tts_out.wav
 *.out.wav

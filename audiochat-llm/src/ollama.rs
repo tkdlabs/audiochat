@@ -9,65 +9,10 @@ use std::time::Duration;
 use audiochat_core::{Llm, LlmResponse, LlmStreamItem};
 use serde::{Deserialize, Serialize};
 
+use crate::chat::{build_request_messages, trim_messages, ChatMessage, DEFAULT_SYSTEM_PROMPT};
+
 const DEFAULT_BASE: &str = "http://localhost:11434";
 const DEFAULT_MAX_TURNS: usize = 10;
-
-/// A message in the conversation history (role + content).
-#[derive(Serialize, Clone)]
-pub struct ChatMessage {
-    role: String,
-    content: String,
-}
-
-impl ChatMessage {
-    fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: "user".into(),
-            content: content.into(),
-        }
-    }
-
-    fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: "assistant".into(),
-            content: content.into(),
-        }
-    }
-
-    fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: "system".into(),
-            content: content.into(),
-        }
-    }
-}
-
-/// Build the messages for a `/api/chat` request: system prompt (if any) first,
-/// then the bounded conversation history plus the new user turn. The system
-/// message is inserted only after trimming, so it is never dropped.
-fn build_request_messages(
-    history: &[ChatMessage],
-    prompt: &str,
-    system: Option<&str>,
-    max_turns: usize,
-) -> Vec<ChatMessage> {
-    let mut messages = history.to_vec();
-    messages.push(ChatMessage::user(prompt));
-    trim_messages(&mut messages, max_turns);
-    if let Some(system) = system {
-        messages.insert(0, ChatMessage::system(system));
-    }
-    messages
-}
-
-/// Trim the oldest messages so at most `max_turns` user+assistant pairs remain.
-fn trim_messages(messages: &mut Vec<ChatMessage>, max_turns: usize) {
-    let max_msgs = max_turns * 2;
-    if messages.len() > max_msgs {
-        let excess = messages.len() - max_msgs;
-        messages.drain(0..excess);
-    }
-}
 
 /// An LLM client for a local [Ollama](https://ollama.com) server.
 pub struct Ollama {
@@ -82,15 +27,6 @@ pub struct Ollama {
     /// Context window size in tokens (None = model default).
     num_ctx: Option<u32>,
 }
-
-/// Default system prompt: encourage short, conversational replies rather than
-/// lecture-style answers, since they are spoken aloud.
-const DEFAULT_SYSTEM_PROMPT: &str = "\
-You are an assistant having a natural spoken conversation. \
-Keep replies short, conversational, and to the point. \
-Speak like a dialog partner, not a lecture. \
-Avoid headings, lists, and long-winded explanations. \
-Use one or two sentences unless the user explicitly asks for more detail.";
 
 /// Request body for `/api/chat`.
 #[derive(Serialize)]

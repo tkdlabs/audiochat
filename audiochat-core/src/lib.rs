@@ -18,7 +18,7 @@ pub use capture::MicCapture;
 pub use config::AudioConfig;
 pub use conversation::ConversationLogger;
 pub use markdown::strip_markdown;
-pub use pipeline::{Pipeline, TurnTiming};
+pub use pipeline::{Pipeline, SpeechTiming, TurnTiming};
 pub use resample::LinearResampler;
 pub use session::Session;
 pub use vad::EnergyVad;

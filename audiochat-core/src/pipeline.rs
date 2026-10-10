@@ -88,13 +88,35 @@ fn with_retry<T>(
     Err(last_msg.unwrap_or_else(|| format!("{what} failed")).into())
 }
 
-/// Per-turn latency metrics, in milliseconds, for a spoken round-trip.
+/// Speech-side timing measured before the LLM runs, all in milliseconds and
+/// relative to the true end of the user's speech.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SpeechTiming {
+    /// The VAD's trailing-silence window: how long it waited after the last
+    /// speech frame before cutting the candidate.
+    pub vad_ms: u64,
+    /// Cumulative speech-recognition inference time for the turn (may span
+    /// several re-transcriptions after mid-sentence pauses).
+    pub stt_ms: u64,
+    /// End of speech -> the turn was dispatched to the pipeline (VAD window +
+    /// endpointer hold + STT).
+    pub endpoint_ms: u64,
+}
+
+/// Per-turn latency metrics, in milliseconds, for a spoken round-trip. All
+/// "first-*" values are measured from the true end of the user's speech.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TurnTiming {
-    /// End of speech (utterance handed to the pipeline) -> STT result.
+    /// VAD trailing-silence window before the utterance was cut.
+    pub vad_ms: u64,
+    /// Speech-recognition inference time.
     pub stt_ms: u64,
+    /// End of speech -> turn dispatched (VAD window + endpointer hold + STT).
+    pub endpoint_ms: u64,
     /// End of speech -> first LLM token received.
     pub first_token_ms: u64,
+    /// Duration of the first TTS synthesis call (network + inference).
+    pub tts_first_ms: u64,
     /// End of speech -> first synthesized audio enqueued for playback.
     pub first_audio_ms: u64,
     /// End of speech -> last token received (full reply streamed).
@@ -106,9 +128,12 @@ pub struct TurnTiming {
 impl TurnTiming {
     fn print(&self) {
         eprintln!(
-            "  └ latency: stt={}ms first-token={}ms first-audio={}ms stream={}ms total={}ms",
+            "  └ latency: endpoint={}ms (vad={} stt={}) first-token={}ms tts-first={}ms first-audio={}ms stream={}ms total={}ms",
+            self.endpoint_ms,
+            self.vad_ms,
             self.stt_ms,
             self.first_token_ms,
+            self.tts_first_ms,
             self.first_audio_ms,
             self.full_stream_ms,
             self.total_ms
@@ -211,11 +236,13 @@ impl Pipeline {
         &mut self,
         question: &str,
         completed_at: Instant,
-        stt_ms: u64,
+        speech: SpeechTiming,
     ) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
         let start = completed_at;
         let mut timing = TurnTiming {
-            stt_ms,
+            vad_ms: speech.vad_ms,
+            stt_ms: speech.stt_ms,
+            endpoint_ms: speech.endpoint_ms,
             ..Default::default()
         };
 
@@ -264,8 +291,9 @@ impl Pipeline {
                         }
                         return Ok(None);
                     }
-                    self.synthesize_and_play(&chunk)?;
+                    let tts_ms = self.synthesize_and_play(&chunk)?;
                     if !saw_first_audio {
+                        timing.tts_first_ms = tts_ms;
                         timing.first_audio_ms = start.elapsed().as_millis() as u64;
                         saw_first_audio = true;
                     }
@@ -275,8 +303,9 @@ impl Pipeline {
         timing.full_stream_ms = start.elapsed().as_millis() as u64;
 
         if !segment.trim().is_empty() {
-            self.synthesize_and_play(&segment)?;
+            let tts_ms = self.synthesize_and_play(&segment)?;
             if !saw_first_audio {
+                timing.tts_first_ms = tts_ms;
                 timing.first_audio_ms = start.elapsed().as_millis() as u64;
             }
         }
@@ -312,8 +341,11 @@ impl Pipeline {
                 question,
                 &reply,
                 crate::conversation::Timing {
+                    vad_ms: timing.vad_ms,
                     stt_ms: timing.stt_ms,
+                    endpoint_ms: timing.endpoint_ms,
                     first_token_ms: timing.first_token_ms,
+                    tts_first_ms: timing.tts_first_ms,
                     first_audio_ms: timing.first_audio_ms,
                     stream_ms: timing.full_stream_ms,
                     total_ms: timing.total_ms,
@@ -323,31 +355,34 @@ impl Pipeline {
         Ok(did_reply.then_some(reply))
     }
 
-    /// Play `text` by synthesizing it and enqueuing to the audio sink.
-    fn synthesize_and_play(&mut self, text: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    /// Play `text` by synthesizing it and enqueuing to the audio sink. Returns
+    /// the TTS synthesis duration in milliseconds (0 when nothing was spoken).
+    fn synthesize_and_play(&mut self, text: &str) -> Result<u64, Box<dyn Error + Send + Sync>> {
         let text = text.trim();
         if text.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         // LLM replies are often Markdown; Piper would read the markup symbols
         // aloud, so speak a plain-text version (the terminal keeps the original).
         let plain = crate::markdown::strip_markdown(text);
         let plain = plain.trim();
         if plain.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         // Audio will be emitted once enqueued; engage the gate only then, so a
         // background capture thread keeps recording during (potentially slow)
         // synthesis rather than being muted while nothing is audible.
         self.ensure_sink()?;
+        let t0 = Instant::now();
         let pcm = with_retry("tts synthesize", 2, 200, || self.tts.synthesize(plain))?;
+        let tts_ms = t0.elapsed().as_millis() as u64;
         if self.speak_replies && !pcm.is_empty() {
             if let Some(sink) = &self.sink {
                 self.set_gate(true);
                 sink.push(pcm);
             }
         }
-        Ok(())
+        Ok(tts_ms)
     }
 
     /// Lazily open the audio sink if replies are to be spoken.

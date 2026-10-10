@@ -11,6 +11,12 @@ path = "src/main.rs"
 [dependencies]
 audiochat-core = { workspace = true }
 audiochat-stt-whisper = { workspace = true }
+audiochat-stt-audiocpp = { workspace = true }
 audiochat-tts-piper = { workspace = true }
+audiochat-tts-audiocpp = { workspace = true }
 audiochat-llm = { workspace = true }
 ctrlc = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+inquire = { version = "0.9", features = ["editor"] }
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }

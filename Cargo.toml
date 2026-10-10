@@ -3,7 +3,9 @@ resolver = "2"
 members = [
     "audiochat-core",
     "audiochat-stt-whisper",
+    "audiochat-stt-audiocpp",
     "audiochat-tts-piper",
+    "audiochat-tts-audiocpp",
     "audiochat-llm",
     "audiochat-cli",
 ]
@@ -17,7 +19,9 @@ repository = "https://github.com/tkdlabs/audiochat"
 [workspace.dependencies]
 audiochat-core = { path = "audiochat-core" }
 audiochat-stt-whisper = { path = "audiochat-stt-whisper" }
+audiochat-stt-audiocpp = { path = "audiochat-stt-audiocpp" }
 audiochat-tts-piper = { path = "audiochat-tts-piper" }
+audiochat-tts-audiocpp = { path = "audiochat-tts-audiocpp" }
 audiochat-llm = { path = "audiochat-llm" }
 
 [profile.release]

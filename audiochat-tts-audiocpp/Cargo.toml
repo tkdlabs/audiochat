@@ -1,0 +1,11 @@
+[package]
+name = "audiochat-tts-audiocpp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+audiochat-core = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+ureq = { version = "3.4", default-features = false, features = ["json", "rustls"] }
+hound = "3.5"

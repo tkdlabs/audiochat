@@ -13,13 +13,14 @@
 //! the current reply, and captures the interruption as the next turn.
 
 use std::error::Error;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::capture::MicCapture;
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, SpeechTiming};
 use crate::traits::SpeechRecognizer;
 use crate::vad::EnergyVad;
 use crate::DEFAULT_SAMPLE_RATE;
@@ -38,6 +39,10 @@ const MAX_TURN_SAMPLES: usize = 30 * DEFAULT_SAMPLE_RATE as usize;
 /// ~300 ms debounces brief noises and the assistant's own voice leaking into
 /// the mic, so a stray sound doesn't cut off the reply.
 const BARGE_IN_SPEECH_FRAMES: u64 = 10;
+/// Step (ms) the interactive `+`/`-` control nudges the pause window by.
+const PAUSE_STEP_MS: u64 = 250;
+/// Smallest allowed pause window (ms), so it can't be driven to zero.
+const MIN_PAUSE_MS: u64 = 100;
 
 /// Shared controls handed to the background capture thread.
 struct CaptureCtrl {
@@ -67,8 +72,12 @@ struct Utterance {
 /// A transcribed utterance ready for the LLM, plus its timing provenance.
 struct SttResult {
     question: String,
+    /// True end of the user's speech (the latency origin).
     completed_at: Instant,
+    /// Cumulative speech-recognition inference time for the turn.
     stt_ms: u64,
+    /// End of speech -> this result was dispatched.
+    endpoint_ms: u64,
 }
 
 /// A transcription that ended mid-sentence. The endpointer holds it and waits
@@ -86,6 +95,8 @@ struct PendingTurn {
     /// Most recent transcription of `audio`, so a timeout flush doesn't need to
     /// re-run STT.
     text: String,
+    /// Cumulative STT inference time (ms) for this turn so far.
+    stt_ms: u64,
 }
 
 /// Whether a transcript ends in sentence-ending punctuation, indicating the user
@@ -94,21 +105,129 @@ fn ends_with_sentence_boundary(text: &str) -> bool {
     text.ends_with('.') || text.ends_with('!') || text.ends_with('?')
 }
 
-/// Send a finalized turn to the main loop, recording its STT latency.
+/// Split a spoken stop word off a transcript.
+///
+/// Returns `(remainder, had_stop)`:
+/// - `(None, true)` when the whole transcript is the stop word.
+/// - `(Some(rest), true)` when the transcript ends in the stop word preceded by
+///   sentence punctuation (e.g. `"what's the weather. stop"` -> `"what's the
+///   weather"`).
+/// - `(Some(text), false)` when the stop word is absent.
+///
+/// The punctuation requirement avoids swallowing a genuine question that merely
+/// happens to end in the word (e.g. `"how do I make it stop"`).
+fn split_stop_word(text: &str, word: &str) -> (Option<String>, bool) {
+    let word = word.trim().to_lowercase();
+    if word.is_empty() {
+        return (Some(text.to_string()), false);
+    }
+    let trimmed = text.trim();
+    let core = trimmed.trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '\'');
+    let core_lower = core.to_lowercase();
+
+    if core_lower == word {
+        return (None, true);
+    }
+
+    if core_lower.ends_with(&word) {
+        let idx = core.len() - word.len();
+        if core.is_char_boundary(idx) {
+            let prefix = core[..idx].trim_end();
+            if prefix.is_empty() {
+                return (None, true);
+            }
+            if prefix.ends_with(['.', '!', '?', ',', ';', ':']) {
+                let rest = prefix
+                    .trim_end_matches(|c: char| c.is_whitespace() || ".,;:!?".contains(c))
+                    .to_string();
+                return if rest.is_empty() {
+                    (None, true)
+                } else {
+                    (Some(rest), true)
+                };
+            }
+        }
+    }
+    (Some(text.to_string()), false)
+}
+
+/// Interactive control console read from stdin while the session runs. Lets the
+/// user tune the pause window live and stop an in-progress reply without
+/// restarting. Only started when stdin is a terminal.
+fn control_console(
+    pause: Arc<AtomicU64>,
+    gate: Arc<AtomicBool>,
+    barge: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+) {
+    use std::io::BufRead;
+    let stdin = std::io::stdin();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        let cmd = line.trim().to_ascii_lowercase();
+        match cmd.as_str() {
+            "" => {}
+            "+" | "longer" => {
+                let v = pause.load(Ordering::Relaxed) + PAUSE_STEP_MS;
+                pause.store(v, Ordering::Relaxed);
+                eprintln!("[control] pause = {v} ms");
+            }
+            "-" | "shorter" => {
+                let v = pause
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(PAUSE_STEP_MS)
+                    .max(MIN_PAUSE_MS);
+                pause.store(v, Ordering::Relaxed);
+                eprintln!("[control] pause = {v} ms");
+            }
+            "pause" | "?" => eprintln!("[control] pause = {} ms", pause.load(Ordering::Relaxed)),
+            "stop" => {
+                if gate.load(Ordering::Acquire) {
+                    barge.store(true, Ordering::Release);
+                    eprintln!("[control] interrupting reply");
+                } else {
+                    eprintln!("[control] nothing is playing");
+                }
+            }
+            "quit" | "exit" => {
+                stop.store(true, Ordering::Relaxed);
+                break;
+            }
+            _ => {
+                if let Some(rest) = cmd.strip_prefix("pause ") {
+                    if let Ok(v) = rest.trim().parse::<u64>() {
+                        let v = v.max(MIN_PAUSE_MS);
+                        pause.store(v, Ordering::Relaxed);
+                        eprintln!("[control] pause = {v} ms");
+                        continue;
+                    }
+                }
+                eprintln!("[control] commands: +  -  pause <ms>  stop  quit");
+            }
+        }
+    }
+}
+
+/// Send a finalized turn to the main loop, recording its STT/endpointer timing.
 fn dispatch(
     result_tx: &mpsc::SyncSender<SttResult>,
     question: String,
     completed_at: Instant,
+    stt_ms: u64,
     verbose: bool,
 ) {
-    let stt_ms = completed_at.elapsed().as_millis() as u64;
+    let endpoint_ms = completed_at.elapsed().as_millis() as u64;
     if verbose {
-        log("stt", &format!("transcribed ({stt_ms} ms): {question}"));
+        log(
+            "stt",
+            &format!("transcribed (endpoint {endpoint_ms} ms, stt {stt_ms} ms): {question}"),
+        );
     }
     let _ = result_tx.try_send(SttResult {
         question,
         completed_at,
         stt_ms,
+        endpoint_ms,
     });
 }
 
@@ -119,6 +238,7 @@ fn capture_loop(
     ctrl: CaptureCtrl,
     mic: MicCapture,
     utt_tx: mpsc::SyncSender<Utterance>,
+    vad_ms: u64,
     verbose: bool,
 ) {
     let mut vad = vad;
@@ -221,7 +341,7 @@ fn capture_loop(
                 }
                 let _ = utt_tx.send(Utterance {
                     pcm: utterance,
-                    completed_at: Instant::now(),
+                    completed_at: Instant::now() - Duration::from_millis(vad_ms),
                 });
             } else if verbose {
                 log(
@@ -245,7 +365,7 @@ fn capture_loop(
         if utt.len() >= MIN_UTTERANCE_SAMPLES {
             let _ = utt_tx.send(Utterance {
                 pcm: utt,
-                completed_at: Instant::now(),
+                completed_at: Instant::now() - Duration::from_millis(vad_ms),
             });
         }
     }
@@ -268,7 +388,8 @@ fn stt_loop(
     utt_rx: mpsc::Receiver<Utterance>,
     result_tx: mpsc::SyncSender<SttResult>,
     stop: Arc<AtomicBool>,
-    vad_max_silence_ms: u64,
+    pause: Arc<AtomicU64>,
+    stop_word: Option<String>,
     verbose: bool,
 ) {
     let mut pending: Option<PendingTurn> = None;
@@ -282,10 +403,11 @@ fn stt_loop(
         // enough, or the audio has grown unboundedly long, so we never wait
         // forever for a sentence boundary that never arrives.
         if let Some(p) = &pending {
+            let hold_ms = pause.load(Ordering::Relaxed).max(MIN_PAUSE_MS);
             let idle_ms = p.hold_since.elapsed().as_millis() as u64;
-            if idle_ms >= vad_max_silence_ms || p.audio.len() >= MAX_TURN_SAMPLES {
+            if idle_ms >= hold_ms || p.audio.len() >= MAX_TURN_SAMPLES {
                 let p = pending.take().expect("pending checked above");
-                dispatch(&result_tx, p.text, p.completed_at, verbose);
+                dispatch(&result_tx, p.text, p.completed_at, p.stt_ms, verbose);
                 continue;
             }
         }
@@ -298,14 +420,18 @@ fn stt_loop(
 
         // Accumulate the new candidate onto any held audio: a mid-sentence
         // pause continues the same turn rather than starting a new one.
-        let (mut audio, last_text) = match pending.take() {
-            Some(p) => (p.audio, Some(p.text)),
-            None => (Vec::new(), None),
+        let (mut audio, last_text, mut stt_ms) = match pending.take() {
+            Some(p) => (p.audio, Some(p.text), p.stt_ms),
+            None => (Vec::new(), None, 0),
         };
         audio.extend_from_slice(&utterance.pcm);
         let completed_at = utterance.completed_at;
 
-        match recognizer.transcribe(&audio) {
+        let t0 = Instant::now();
+        let recognized = recognizer.transcribe(&audio);
+        stt_ms += t0.elapsed().as_millis() as u64;
+
+        match recognized {
             Ok(question) => {
                 let question = question.trim().to_string();
                 if question.is_empty() {
@@ -316,12 +442,41 @@ fn stt_loop(
                             completed_at,
                             hold_since: Instant::now(),
                             text,
+                            stt_ms,
                         });
                     }
                     continue;
                 }
+
+                // A spoken stop word finalizes the turn immediately (rather than
+                // waiting out the pause), or submits a held question.
+                if let Some(word) = &stop_word {
+                    let (rest, had_stop) = split_stop_word(&question, word);
+                    if had_stop {
+                        match rest {
+                            Some(rest) => {
+                                if verbose {
+                                    log("stt", &format!("stop word: submitting: {rest}"));
+                                }
+                                dispatch(&result_tx, rest, completed_at, stt_ms, verbose);
+                            }
+                            None => {
+                                if let Some(text) = last_text {
+                                    if verbose {
+                                        log("stt", &format!("stop word: submitting: {text}"));
+                                    }
+                                    dispatch(&result_tx, text, completed_at, stt_ms, verbose);
+                                } else if verbose {
+                                    log("stt", "stop word: nothing to submit");
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+
                 if ends_with_sentence_boundary(&question) {
-                    dispatch(&result_tx, question, completed_at, verbose);
+                    dispatch(&result_tx, question, completed_at, stt_ms, verbose);
                 } else {
                     if verbose {
                         log("stt", &format!("holding mid-sentence: {question}"));
@@ -331,6 +486,7 @@ fn stt_loop(
                         completed_at,
                         hold_since: Instant::now(),
                         text: question,
+                        stt_ms,
                     });
                 }
             }
@@ -343,6 +499,7 @@ fn stt_loop(
                         completed_at,
                         hold_since: Instant::now(),
                         text,
+                        stt_ms,
                     });
                 }
             }
@@ -351,7 +508,7 @@ fn stt_loop(
 
     // Flush a held turn on shutdown so it isn't silently dropped.
     if let Some(p) = pending {
-        dispatch(&result_tx, p.text, p.completed_at, verbose);
+        dispatch(&result_tx, p.text, p.completed_at, p.stt_ms, verbose);
     }
 }
 
@@ -382,6 +539,15 @@ pub struct Session {
     /// Trailing silence (ms) that ends a candidate speech segment. The STT
     /// endpointer may hold a mid-sentence segment for up to one more window.
     pub vad_max_silence_ms: u64,
+    /// How long (ms) the endpointer holds a mid-sentence transcript before
+    /// dispatching, waiting for the user to resume. `None` follows
+    /// `vad_max_silence_ms` (so `--vad-silence` keeps its old meaning); set
+    /// independently with `--pause`, and adjustable live from the control
+    /// console.
+    pub pause_ms: Option<u64>,
+    /// Spoken code word that finalizes the current turn immediately and is not
+    /// sent to the LLM (e.g. "stop"). `None` disables it.
+    pub stop_word: Option<String>,
     /// Whether the user may interrupt an in-progress reply by speaking.
     pub barge_in: bool,
     /// RMS threshold (0..1) that triggers barge-in, higher than `vad_threshold`
@@ -398,6 +564,8 @@ impl Default for Session {
             adaptive_noise: true,
             noise_ratio: 2.0,
             vad_max_silence_ms: 600,
+            pause_ms: None,
+            stop_word: Some("stop".to_string()),
             barge_in: false,
             barge_in_threshold: 0.06,
             verbose: false,
@@ -454,6 +622,28 @@ impl Session {
         self
     }
 
+    /// Set how long (ms) the endpointer holds a mid-sentence transcript waiting
+    /// for the user to resume. Larger values tolerate longer thinking pauses
+    /// before a turn is dispatched. Adjustable at runtime from the control
+    /// console (`+`/`-`/`pause <ms>`).
+    pub fn with_pause(mut self, ms: u64) -> Self {
+        self.pause_ms = Some(ms.max(MIN_PAUSE_MS));
+        self
+    }
+
+    /// Set (or disable, with `None`) the spoken code word that finalizes the
+    /// current turn immediately without waiting out the pause.
+    pub fn with_stop_word(mut self, word: Option<String>) -> Self {
+        self.stop_word = word.filter(|w| !w.trim().is_empty());
+        self
+    }
+
+    /// The endpointer hold window in ms, resolving `pause_ms` against the VAD
+    /// window default.
+    fn effective_pause_ms(&self) -> u64 {
+        self.pause_ms.unwrap_or(self.vad_max_silence_ms)
+    }
+
     /// Enable/disable verbose listening/muting logging.
     pub fn with_verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
@@ -478,6 +668,7 @@ impl Session {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let gate = Arc::new(AtomicBool::new(false));
         let barge = Arc::new(AtomicBool::new(false));
+        let pause = Arc::new(AtomicU64::new(self.effective_pause_ms()));
         pipeline = pipeline
             .with_gate(Some(Arc::clone(&gate)))
             .with_barge(Some(Arc::clone(&barge)));
@@ -493,26 +684,38 @@ impl Session {
             .with_adaptive_noise(self.adaptive_noise)
             .with_noise_ratio(self.noise_ratio);
         let ctrl = CaptureCtrl {
-            gate,
+            gate: Arc::clone(&gate),
             stop: Arc::clone(&stop_flag),
-            barge,
+            barge: Arc::clone(&barge),
             barge_enabled: self.barge_in,
             barge_threshold: self.barge_in_threshold,
         };
         let verbose = self.verbose;
 
+        // Live controls (pause tuning, stop) when running interactively.
+        if std::io::stdin().is_terminal() {
+            eprintln!(
+                "audiochat: controls: + / - nudge pause (now {} ms), 'pause <ms>', 'stop', 'quit'",
+                pause.load(Ordering::Relaxed)
+            );
+            let (c_pause, c_gate, c_barge, c_stop) = (
+                Arc::clone(&pause),
+                Arc::clone(&gate),
+                Arc::clone(&barge),
+                Arc::clone(&stop_flag),
+            );
+            std::thread::spawn(move || control_console(c_pause, c_gate, c_barge, c_stop));
+        }
+
         let capture_handle = std::thread::spawn(move || {
-            capture_loop(vad, ctrl, mic, utt_tx, verbose);
+            capture_loop(vad, ctrl, mic, utt_tx, self.vad_max_silence_ms, verbose);
         });
         let stt_stop = Arc::clone(&stop_flag);
+        let stt_pause = Arc::clone(&pause);
+        let stop_word = self.stop_word.clone();
         let stt_handle = std::thread::spawn(move || {
             stt_loop(
-                stt,
-                utt_rx,
-                result_tx,
-                stt_stop,
-                self.vad_max_silence_ms,
-                verbose,
+                stt, utt_rx, result_tx, stt_stop, stt_pause, stop_word, verbose,
             );
         });
 
@@ -526,7 +729,12 @@ impl Session {
             }
             match result_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(result) => {
-                    pipeline.respond(&result.question, result.completed_at, result.stt_ms)?;
+                    let speech = SpeechTiming {
+                        vad_ms: self.vad_max_silence_ms,
+                        stt_ms: result.stt_ms,
+                        endpoint_ms: result.endpoint_ms,
+                    };
+                    pipeline.respond(&result.question, result.completed_at, speech)?;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -578,7 +786,15 @@ mod tests {
                 .into_iter(),
         };
         let handle = std::thread::spawn(move || {
-            stt_loop(Box::new(recognizer), utt_rx, result_tx, stop, 600, false);
+            stt_loop(
+                Box::new(recognizer),
+                utt_rx,
+                result_tx,
+                stop,
+                Arc::new(AtomicU64::new(600)),
+                Some("stop".to_string()),
+                false,
+            );
         });
 
         utt_tx
@@ -616,7 +832,15 @@ mod tests {
             transcriptions: vec!["What's the weather?".to_string()].into_iter(),
         };
         let handle = std::thread::spawn(move || {
-            stt_loop(Box::new(recognizer), utt_rx, result_tx, stop, 600, false);
+            stt_loop(
+                Box::new(recognizer),
+                utt_rx,
+                result_tx,
+                stop,
+                Arc::new(AtomicU64::new(600)),
+                Some("stop".to_string()),
+                false,
+            );
         });
 
         utt_tx
@@ -627,6 +851,71 @@ mod tests {
             .unwrap();
         let result = result_rx.recv_timeout(Duration::from_millis(200)).unwrap();
         assert_eq!(result.question, "What's the weather?");
+        drop(utt_tx);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn splits_stop_word() {
+        // Whole utterance (with or without trailing punctuation).
+        assert_eq!(split_stop_word("Stop.", "stop"), (None, true));
+        assert_eq!(split_stop_word("stop", "stop"), (None, true));
+        // After sentence punctuation: the remainder is submitted immediately.
+        assert_eq!(
+            split_stop_word("What's the weather. stop", "stop"),
+            (Some("What's the weather".to_string()), true)
+        );
+        // A genuine question ending in the word is left alone.
+        assert_eq!(
+            split_stop_word("how do I make it stop", "stop"),
+            (Some("how do I make it stop".to_string()), false)
+        );
+        // No stop word at all.
+        assert_eq!(
+            split_stop_word("hello world", "stop"),
+            (Some("hello world".to_string()), false)
+        );
+    }
+
+    #[test]
+    fn stop_word_submits_held_turn_immediately() {
+        let (utt_tx, utt_rx) = mpsc::sync_channel::<Utterance>(4);
+        let (result_tx, result_rx) = mpsc::sync_channel::<SttResult>(4);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // A mid-sentence question is held; a bare "stop" submits it without
+        // waiting out the (deliberately huge) pause window.
+        let recognizer = ScriptedRecognizer {
+            transcriptions: vec!["I think it's sunny".to_string(), "stop".to_string()].into_iter(),
+        };
+        let handle = std::thread::spawn(move || {
+            stt_loop(
+                Box::new(recognizer),
+                utt_rx,
+                result_tx,
+                stop,
+                Arc::new(AtomicU64::new(60_000)),
+                Some("stop".to_string()),
+                false,
+            );
+        });
+
+        utt_tx
+            .send(Utterance {
+                pcm: vec![1, 2, 3],
+                completed_at: Instant::now(),
+            })
+            .unwrap();
+        assert!(result_rx.recv_timeout(Duration::from_millis(100)).is_err());
+
+        utt_tx
+            .send(Utterance {
+                pcm: vec![4, 5, 6],
+                completed_at: Instant::now(),
+            })
+            .unwrap();
+        let result = result_rx.recv_timeout(Duration::from_millis(300)).unwrap();
+        assert_eq!(result.question, "I think it's sunny");
         drop(utt_tx);
         handle.join().unwrap();
     }

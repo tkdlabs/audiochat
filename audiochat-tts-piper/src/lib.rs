@@ -100,7 +100,7 @@ impl Piper {
             .arg(&self.model)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
                 Box::<dyn Error + Send + Sync>::from(PiperError(format!(
@@ -114,12 +114,42 @@ impl Piper {
         let mut stdout = BufReader::new(child.stdout.take().ok_or_else(|| {
             Box::<dyn Error + Send + Sync>::from(PiperError("no piper helper stdout".into()))
         })?);
+        let mut stderr = child.stderr.take();
 
-        let sample_rate = read_u32(&mut stdout).map_err(|e| {
-            Box::<dyn Error + Send + Sync>::from(PiperError(format!(
-                "piper helper failed to start (is the voice model valid?): {e}"
-            )))
-        })?;
+        let sample_rate = match read_u32(&mut stdout) {
+            Ok(sr) => sr,
+            Err(e) => {
+                // The helper died before its startup header: surface its stderr
+                // (usually the real reason, e.g. `ModuleNotFoundError: piper`).
+                let mut detail = String::new();
+                if let Some(mut err) = stderr.take() {
+                    use std::io::Read;
+                    let _ = err.read_to_string(&mut detail);
+                }
+                let detail = detail.trim();
+                let detail = if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {detail}")
+                };
+                return Err(Box::<dyn Error + Send + Sync>::from(PiperError(format!(
+                    "piper helper failed to start{detail} ({e}) \
+                     (is piper-tts installed? set AUDIOCHAT_PYTHON to a venv with it, \
+                     or use --tts-backend audiocpp)"
+                ))));
+            }
+        };
+
+        // Keep draining the helper's stderr so it never blocks or dies on a
+        // full pipe, forwarding anything it prints with a prefix.
+        if let Some(stderr) = stderr {
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    eprintln!("piper: {line}");
+                }
+            });
+        }
 
         self.process = Some(PiperProcess {
             child,

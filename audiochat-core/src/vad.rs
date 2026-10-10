@@ -84,6 +84,11 @@ impl EnergyVad {
         self
     }
 
+    /// The configured trailing-silence window (ms) that ends an utterance.
+    pub fn max_silence_ms(&self) -> u64 {
+        self.max_silence_ms
+    }
+
     /// Configure how much leading silence (ms) is prepended to each utterance.
     pub fn with_pre_roll_ms(mut self, ms: u64) -> Self {
         self.pre_roll_len = self.frame_len * ms as usize / self.frame_ms as usize;

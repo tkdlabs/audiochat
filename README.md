@@ -25,7 +25,9 @@ Rust workspace. See `PLAN.md` for the detailed first-iteration plan.
 
 - `audiochat-core` — pipeline orchestration, VAD, pluggable traits
 - `audiochat-stt-whisper` — whisper.cpp STT backend
+- `audiochat-stt-audiocpp` — audio.cpp HTTP STT backend
 - `audiochat-tts-piper` — Piper TTS backend
+- `audiochat-tts-audiocpp` — audio.cpp HTTP TTS backend
 - `audiochat-llm` — pluggable LLM clients (Ollama, OpenAI-compatible)
 - `audiochat-cli` — end-to-end CLI binary
 
@@ -50,6 +52,104 @@ cargo run -p audiochat-core --example audio_devices
 cargo run -p audiochat-cli -- --device "C920" models/ggml-tiny.en.bin
 ```
 
+### STT (audio.cpp, remote/fast)
+
+Instead of local whisper, STT can run on an [audio.cpp](https://github.com/0xShug0/audio.cpp)
+GPU host via its OpenAI-compatible `POST /v1/audio/transcriptions`. Select it
+with `--stt-backend audiocpp`; the default server is
+`http://localhost:8080` with model `moonshine-asr` (Moonshine
+Streaming Tiny — English, and very fast). Use `--stt-model nemotron-asr`
+(Nemotron 3.5 ASR Streaming 0.6B) for multilingual recognition.
+
+```
+# Live mic -> text using the remote GPU STT:
+cargo run -p audiochat-cli -- --stt-backend audiocpp
+
+# Offline STT on a WAV (no playback):
+cargo run -p audiochat-stt-audiocpp --example audiocpp_transcribe -- test.wav
+```
+
+`--stt-url` (env `AUDIOCHAT_STT_URL`) sets the base URL, `--stt-model` (env
+`AUDIOCHAT_STT_MODEL`) the server-side ASR model id, and `--stt-language` (env
+`AUDIOCHAT_STT_LANGUAGE`, e.g. `en-US`) the recognition language (omit for
+auto-detect). With this backend no local whisper model file is needed. audio.cpp
+also exposes a streaming `/v1/audio/transcriptions/live` endpoint; a streaming
+recognizer that transcribes while you speak is a future addition.
+
+## Setup wizard & templates
+
+`--wizard` walks through the STT, TTS, and LLM backends plus the system prompt
+with arrow-key menus, then saves the result as a named template and/or launches
+speech-to-speech. Model fields are populated from what the backends actually
+report — audio.cpp's `/v1/models` (ASR/TTS), Ollama's `/api/tags`, and
+OpenAI-compatible `/v1/models` — while local whisper/Piper files are found under
+`models/`; every list has a "Type manually" escape hatch:
+
+```
+cargo run --release -p audiochat-cli -- --wizard
+```
+
+Templates are JSON files under `~/.config/audiochat/templates/` (override the
+root with `AUDIOCHAT_CONFIG_DIR` or `XDG_CONFIG_HOME`):
+
+```
+# Save the current flags as a reusable template (no mic is opened):
+cargo run -p audiochat-cli -- --save-template fast \
+  --stt-backend audiocpp --llm-provider opencode-go --tts-backend audiocpp
+
+# Run from a saved template (explicit flags still take precedence):
+cargo run --release -p audiochat-cli -- --template fast --s2s
+# List / edit / delete:
+cargo run -p audiochat-cli -- --list-templates
+cargo run -p audiochat-cli -- --edit-template fast
+cargo run -p audiochat-cli -- --delete-template fast
+```
+
+The wizard never writes the LLM API key to disk; it is read from
+`AUDIOCHAT_LLM_API_KEY`/`OPENCODE_API_KEY` or opencode's `auth.json`.
+
+Loading a template that configures STT, TTS, and an LLM enables `--s2s`
+automatically, so the wizard-built and full-stack templates run the whole loop;
+an explicit `--prompt`/`--speak` still overrides.
+
+## Quick start (full speech-to-speech)
+
+Talk to it end to end using the fast remote backends: [audio.cpp](#stt-audiocpp-remotefast)
+for STT, [OpenCode Go](#llm-openai-compatible--opencode-go) for the LLM, and
+[audio.cpp](#tts-audiocpp-remotefast) for speech. Mic → STT → LLM → TTS →
+speaker, all in one loop.
+
+```
+cargo run --release -p audiochat-cli -- --s2s \
+  --stt-backend audiocpp \
+  --llm-provider opencode-go \
+  --tts-backend audiocpp
+```
+
+Notes:
+
+- Use `--release`; a debug build adds noticeable latency.
+- All three backends default to the `localhost` host (STT/TTS on port
+  8080) and OpenCode Go's API; no local model files are needed.
+- The OpenCode Go key is read automatically from
+  `~/.local/share/opencode/auth.json` (or set `OPENCODE_API_KEY` /
+  `AUDIOCHAT_LLM_API_KEY`). It runs DeepSeek V4.1 Flash in non-thinking mode.
+- Override endpoints with `--stt-url`/`--stt-model`, `--tts-url`/`--tts-model`/
+  `--tts-voice`.
+- To use local whisper instead, drop `--stt-backend audiocpp` and pass the model
+  path as the first argument (e.g. `models/ggml-tiny.en.bin`).
+- Add `--verbose` for per-turn latency, `--barge-in` to interrupt by speaking
+  (headphones recommended), `--silent` to print replies without speaking, and
+  `--device "NAME"` to pick a mic.
+- To tolerate long thinking pauses, raise `--pause <ms>` (e.g. `--pause 2500`).
+  Tune it live: type `+` / `-` / `pause <ms>` while it runs (see
+  [Live controls](#live-controls--the-stop-word)).
+- Say **"stop"** to finalize the current turn immediately instead of waiting out
+  the pause; customize with `--stop-word` or disable with `--no-stop-word`.
+- Ctrl-C stops it cleanly.
+
+To run fully locally instead, use Ollama + Piper (see the sections below).
+
 ## TTS (Piper)
 
 Piper runs as a persistent subprocess: `audiochat-tts-piper` drives a small
@@ -73,6 +173,28 @@ AUDIOCHAT_PYTHON=$PWD/.venv/bin/python \
   cargo run -p audiochat-tts-piper --example tts -- \
   models/voices/en_US-lessac-medium.onnx "Text to a wav file."
 ```
+
+### TTS (audio.cpp, remote/fast)
+
+For lower-latency synthesis you can run [audio.cpp](https://github.com/0xShug0/audio.cpp)
+on a GPU host and point audiochat at its OpenAI-compatible speech endpoint
+(`POST /v1/audio/speech`). Select it with `--tts-backend audiocpp`; the default
+server is `http://localhost:8080` with model `qwen3-tts` and voice
+`Serena`.
+
+```
+# Speak text via a remote audio.cpp server:
+cargo run -p audiochat-cli -- --tts-backend audiocpp \
+  --speak "Hello world" --tts-url http://localhost:8080
+
+# Offline audio.cpp TTS -> WAV (no playback):
+cargo run -p audiochat-tts-audiocpp --example audiocpp_tts -- "Text to a wav file."
+```
+
+`--tts-url` (env `AUDIOCHAT_TTS_URL`) sets the base URL, `--tts-voice` (env
+`AUDIOCHAT_TTS_VOICE`) picks the speaker, and `--tts-model` (env
+`AUDIOCHAT_TTS_MODEL`) is the server-side model id. The server returns 24 kHz
+WAV; audiochat decodes it and resamples to the pipeline's 16 kHz mono.
 
 ## LLM (Ollama)
 
@@ -101,6 +223,31 @@ Sampling is configurable per request: `--llm-temperature 0.7` (env
 the model's defaults. A lower temperature makes replies more deterministic (a
 gemma-default 0.8 can feel rambling); a larger `num_ctx` helps long
 conversations.
+
+### LLM (OpenAI-compatible / OpenCode Go)
+
+Set `--llm-provider openai` to talk to any OpenAI-compatible `/chat/completions`
+server, or `--llm-provider opencode-go` for the [OpenCode Go](https://opencode.ai/docs/go)
+subscription (base URL `https://opencode.ai/zen/go/v1`, default model
+`deepseek-v4.1-flash`). Replies stream token-by-token and keep the same bounded
+multi-turn history as the Ollama backend.
+
+```
+# OpenCode Go (key from AUDIOCHAT_LLM_API_KEY, OPENCODE_API_KEY, or opencode's auth.json):
+cargo run -p audiochat-cli -- --llm-provider opencode-go \
+  --prompt "What is 2+2?"
+
+# Any OpenAI-compatible server:
+cargo run -p audiochat-cli -- --llm-provider openai \
+  --llm-url https://api.example.com/v1 --llm-model some-model \
+  --llm-api-key "$MY_KEY" --prompt "Hello"
+```
+
+`--llm-api-key` (env `AUDIOCHAT_LLM_API_KEY`) sets the bearer token; for
+`opencode-go` it falls back to `OPENCODE_API_KEY` and then the `opencode-go`
+entry in `~/.local/share/opencode/auth.json`. Reasoning models like DeepSeek
+V4.1 Flash think by default; audiochat runs them in **non-thinking mode** unless
+you pass `--llm-thinking` (env `AUDIOCHAT_LLM_THINKING=1`).
 
 ## Speech-to-speech (end to end)
 
@@ -135,16 +282,40 @@ AUDIOCHAT_PYTHON=$PWD/.venv/bin/python cargo run -p audiochat-cli -- --s2s \
   models/ggml-tiny.en.bin \
   --tts-model models/voices/en_US-lessac-medium.onnx \
   --llm-model gemma4:e2b
+
+# Fast remote setup: OpenCode Go LLM + audio.cpp TTS:
+cargo run -p audiochat-cli -- --s2s \
+  models/ggml-tiny.en.bin \
+  --llm-provider opencode-go \
+  --tts-backend audiocpp
 ```
 
-Add `--silent` to print replies without speaking them. Add `--verbose` to print
-per-turn latency breakdown (STT → first-token → first-audio → stream end →
-total) plus live capture diagnostics on stderr: when the app is listening vs.
+Add `--silent` to print replies without speaking them. Add `--verbose` to print a
+per-turn latency breakdown on stderr, broken out by layer:
+
+```
+└ latency: endpoint=660ms (vad=600 stt=25) first-token=1520ms tts-first=210ms first-audio=1760ms stream=2100ms total=2600ms
+```
+
+- `endpoint` — end of speech → turn dispatched, split into `vad` (the VAD's
+  trailing-silence window) and `stt` (speech-recognition inference).
+- `first-token` — end of speech → first LLM token (includes the endpoint wait).
+- `tts-first` — duration of the first TTS synthesis call.
+- `first-audio` — end of speech → first audio enqueued.
+- `stream` / `total` — end of speech → last LLM token / last audio enqueued.
+
+`--verbose` also prints live capture diagnostics: when the app is listening vs.
 muted, when it catches speech, when it dispatches an utterance to STT, and when
 it drops a too-short utterance — useful for tuning `--vad-threshold` and
-`--vad-silence` if you're being cut off. All options have `AUDIOCHAT_*` env-var fallbacks (`AUDIOCHAT_DEVICE`,
-`AUDIOCHAT_TTS_MODEL`, `AUDIOCHAT_PYTHON`, `AUDIOCHAT_LLM_MODEL`,
-`AUDIOCHAT_LLM_URL`); flags take precedence. `--s2s` handles Ctrl-C gracefully,
+`--vad-silence` if you're being cut off. To measure the LLM→TTS pipeline without
+a mic, run `cargo run --release -p audiochat-cli --example latency -- "a question"`.
+All options have `AUDIOCHAT_*` env-var fallbacks (`AUDIOCHAT_DEVICE`,
+`AUDIOCHAT_STT_BACKEND`, `AUDIOCHAT_STT_URL`, `AUDIOCHAT_STT_MODEL`,
+`AUDIOCHAT_STT_LANGUAGE`, `AUDIOCHAT_TTS_BACKEND`, `AUDIOCHAT_TTS_MODEL`,
+`AUDIOCHAT_TTS_URL`, `AUDIOCHAT_TTS_VOICE`, `AUDIOCHAT_PYTHON`,
+`AUDIOCHAT_LLM_PROVIDER`, `AUDIOCHAT_LLM_MODEL`, `AUDIOCHAT_LLM_URL`,
+`AUDIOCHAT_LLM_API_KEY`, `AUDIOCHAT_PAUSE`, `AUDIOCHAT_STOP_WORD`); flags take
+precedence. `--s2s` handles Ctrl-C gracefully,
 shutting down the capture thread and stopping playback before exit.
 
 `--conversation-log conversations.jsonl` (env `AUDIOCHAT_CONVERSATION_LOG`) is a
@@ -153,7 +324,7 @@ model, and timing breakdown are appended as a single JSON line (JSONL). Each
 record looks like:
 
 ```json
-{"timestamp":1786326794,"turn":0,"model":"gemma4:e2b","user":"What time is it?","assistant":"It's about 3:20 PM.","timing":{"stt_ms":120,"first_token_ms":180,"first_audio_ms":420,"stream_ms":650,"total_ms":1100}}
+{"timestamp":1786326794,"turn":0,"model":"gemma4:e2b","user":"What time is it?","assistant":"It's about 3:20 PM.","timing":{"vad_ms":600,"stt_ms":25,"endpoint_ms":660,"first_token_ms":1520,"tts_first_ms":210,"first_audio_ms":1760,"stream_ms":2100,"total_ms":2600}}
 ```
 
 Markdown in LLM replies is stripped to plain text before synthesis, so Piper
@@ -171,10 +342,44 @@ detect the end of speech, raise `--vad-threshold` (e.g. `0.04`) or lower
 Turn-ending is handled by a **sentence-boundary endpointer**, not the VAD's
 silence window alone: the VAD's `--vad-silence` window produces candidate
 segments, and the STT worker holds any candidate whose transcript doesn't end in
-`.` / `!` / `?` for up to one more window (waiting for the user to resume) before
+`.` / `!` / `?` for up to `--pause` ms (waiting for the user to resume) before
 dispatching. This means a natural mid-sentence pause longer than the window
 continues the same turn instead of splitting it, while a completed thought still
 dispatches quickly.
+
+`--vad-silence` sets both the VAD's candidate window and the endpointer hold by
+default; `--pause` overrides just the hold, so you can cut candidates promptly
+(for responsive stop-word handling) while still tolerating long thinking pauses.
+
+### Live controls & the stop word
+
+While `--s2s` runs interactively, a control console reads commands from stdin
+(press Enter after each; only active when stdin is a terminal):
+
+| Input | Effect |
+|---|---|
+| `+` / `longer` | increase the pause window by 250 ms |
+| `-` / `shorter` | decrease it (floor 100 ms) |
+| `pause` / `?` | print the current pause window |
+| `pause <ms>` | set it exactly |
+| `stop` | interrupt the reply currently playing |
+| `quit` / `exit` | stop the session |
+
+This makes the pause window tunable without restarting — the biggest win when a
+room or speaking style needs a different wait.
+
+A spoken **stop word** (default `stop`, `--stop-word <word>`,
+`--no-stop-word` to disable) finalizes the current turn immediately instead of
+waiting out the pause:
+
+- Say `stop` on its own to submit a question the endpointer is holding.
+- Say `<question>. stop` to submit the question right away.
+- A question that merely ends in the word (e.g. "how do I make it stop") is left
+  alone, so it still reaches the LLM.
+
+To interrupt the assistant's *reply* by voice, enable `--barge-in` (headphones
+required, since echo cancellation is out of scope) and say `stop`; the reply
+stops and the word is not sent to the LLM.
 
 ## Status
 
