@@ -140,8 +140,9 @@ cargo run -p audiochat-cli -- --save-config \
 Precedence, lowest to highest: built-in fallbacks → this config file → a loaded
 template → `AUDIOCHAT_*` environment variables → explicit CLI flags. So defaults
 apply automatically, and any of the more specific layers still overrides them.
-The config file is read on every run but, like `--save-template`, writing it
-alone does not open the mic.
+The `--wizard` pre-fills its prompts from these defaults (a template being
+edited still wins). The config file is read on every run but, like
+`--save-template`, writing it alone does not open the mic.
 
 ## Quick start (full speech-to-speech)
 

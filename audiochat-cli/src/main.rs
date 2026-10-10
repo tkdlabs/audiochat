@@ -786,12 +786,20 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
 
+    // Global defaults (hosts, model ids, voice) from ~/.config/audiochat/config.json.
+    // They seed the wizard and act as the lowest-priority layer for a normal run.
+    let global_defaults = config::load_defaults()?;
+
     // The wizard produces a template which may then be saved and/or applied.
     if opts.wizard || opts.edit_template.is_some() {
-        let baseline = match &opts.edit_template {
+        let mut baseline = match &opts.edit_template {
             Some(name) => template::Template::load(name)?,
             None => template::Template::default(),
         };
+        // Seed the wizard from the global defaults (a template being edited wins).
+        if let Some(defaults) = &global_defaults {
+            baseline.fill_from(defaults);
+        }
         match wizard::run_wizard(&baseline)? {
             wizard::WizardOutcome::Cancelled => {
                 println!("cancelled; nothing changed.");
@@ -819,10 +827,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
-    // Global defaults (hosts, model ids, voice) from the config file are the
-    // lowest-priority layer: flags, env, and templates already filled their
-    // fields, so this only supplies what is still unset.
-    if let Some(defaults) = config::load_defaults()? {
+    // Global defaults are the lowest-priority layer: flags, env, and templates
+    // already filled their fields, so this only supplies what is still unset.
+    if let Some(defaults) = &global_defaults {
         defaults.apply_to_opts(&mut opts);
     }
 

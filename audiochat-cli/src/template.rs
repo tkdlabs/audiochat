@@ -155,7 +155,70 @@ fn fill<T: Clone>(slot: &mut Option<T>, value: Option<&T>) {
     }
 }
 
+impl SttTemplate {
+    /// Copy fields that are still unset from `other`.
+    fn fill_from(&mut self, other: &SttTemplate) {
+        fill(&mut self.backend, other.backend.as_ref());
+        fill(&mut self.model, other.model.as_ref());
+        fill(&mut self.url, other.url.as_ref());
+        fill(&mut self.language, other.language.as_ref());
+    }
+}
+
+impl TtsTemplate {
+    /// Copy fields that are still unset from `other`.
+    fn fill_from(&mut self, other: &TtsTemplate) {
+        fill(&mut self.backend, other.backend.as_ref());
+        fill(&mut self.model, other.model.as_ref());
+        fill(&mut self.voice, other.voice.as_ref());
+        fill(&mut self.url, other.url.as_ref());
+        fill(&mut self.python, other.python.as_ref());
+    }
+}
+
+impl LlmTemplate {
+    /// Copy fields that are still unset from `other`.
+    fn fill_from(&mut self, other: &LlmTemplate) {
+        fill(&mut self.provider, other.provider.as_ref());
+        fill(&mut self.model, other.model.as_ref());
+        fill(&mut self.url, other.url.as_ref());
+        fill(&mut self.api_key, other.api_key.as_ref());
+        fill(&mut self.thinking, other.thinking.as_ref());
+        fill(&mut self.temperature, other.temperature.as_ref());
+        fill(&mut self.num_ctx, other.num_ctx.as_ref());
+    }
+}
+
+impl AudioTemplate {
+    /// Copy fields that are still unset from `other`.
+    fn fill_from(&mut self, other: &AudioTemplate) {
+        fill(&mut self.vad_threshold, other.vad_threshold.as_ref());
+        fill(&mut self.noise_ratio, other.noise_ratio.as_ref());
+        fill(&mut self.adaptive_noise, other.adaptive_noise.as_ref());
+        fill(&mut self.vad_silence_ms, other.vad_silence_ms.as_ref());
+        fill(&mut self.pause_ms, other.pause_ms.as_ref());
+        fill(&mut self.stop_word, other.stop_word.as_ref());
+        fill(&mut self.barge_in, other.barge_in.as_ref());
+        fill(&mut self.barge_threshold, other.barge_threshold.as_ref());
+    }
+}
+
 impl Template {
+    /// Fill any unset field from `other`, leaving set fields untouched. Used to
+    /// seed the wizard baseline with the global defaults so a template being
+    /// edited (and any explicit choice) still wins.
+    pub fn fill_from(&mut self, other: &Template) {
+        fill(&mut self.name, other.name.as_ref());
+        fill(&mut self.description, other.description.as_ref());
+        fill(&mut self.mode, other.mode.as_ref());
+        fill(&mut self.system_prompt, other.system_prompt.as_ref());
+        fill(&mut self.device, other.device.as_ref());
+        self.stt.fill_from(&other.stt);
+        self.tts.fill_from(&other.tts);
+        self.llm.fill_from(&other.llm);
+        self.audio.fill_from(&other.audio);
+    }
+
     /// The mode this template should run in. Uses the explicit `mode` when set,
     /// otherwise infers `s2s` when both an LLM model and a TTS backend/model are
     /// configured (e.g. templates written before `mode` existed).
@@ -541,5 +604,20 @@ mod tests {
     fn from_opts_records_s2s_mode() {
         let opts = crate::parse_args(&["--s2s".into(), "--llm-model".into(), "m".into()]).unwrap();
         assert_eq!(Template::from_opts(&opts).mode.as_deref(), Some("s2s"));
+    }
+
+    #[test]
+    fn fill_from_supplies_only_unset_fields() {
+        let mut template: Template =
+            serde_json::from_str(r#"{"stt":{"backend":"whisper"},"tts":{"voice":"Kept"}}"#).unwrap();
+        let defaults: Template = serde_json::from_str(
+            r#"{"stt":{"backend":"audiocpp","url":"http://gpu:8080"},"tts":{"voice":"Dylan","model":"qwen3-tts"}}"#,
+        )
+        .unwrap();
+        template.fill_from(&defaults);
+        assert_eq!(template.stt.backend.as_deref(), Some("whisper"));
+        assert_eq!(template.stt.url.as_deref(), Some("http://gpu:8080"));
+        assert_eq!(template.tts.voice.as_deref(), Some("Kept"));
+        assert_eq!(template.tts.model.as_deref(), Some("qwen3-tts"));
     }
 }
