@@ -290,6 +290,27 @@ entry in `~/.local/share/opencode/auth.json`. Reasoning models like DeepSeek
 V4.1 Flash think by default; audiochat runs them in **non-thinking mode** unless
 you pass `--llm-thinking` (env `AUDIOCHAT_LLM_THINKING=1`).
 
+### Speculative holding line
+
+Thinking models add latency before the first spoken token. With
+`--thinking-filler` (env `AUDIOCHAT_THINKING_FILLER=1`) and `--llm-thinking`,
+audiochat fires a **parallel, non-thinking** request to a fast model that speaks
+a short holding line ("Good question, let me think about that…") while the main
+model works. The first real reply token **pre-empts** the holding line, cutting
+its playback and cancelling the helper request, so the user never hears both.
+
+```
+cargo run -p audiochat-cli -- --s2s --llm-thinking --thinking-filler \
+  --llm-provider opencode-go --tts-backend audiocpp
+```
+
+The holding-line model defaults to `deepseek-v4.1-flash` for `opencode-go`; set
+`--filler-model NAME` (env `AUDIOCHAT_FILLER_MODEL`) for other OpenAI-compatible
+servers. The helper client is stateless, so its request never becomes part of
+the conversation history. This needs an OpenAI-compatible provider (`openai` or
+`opencode-go`); it is ignored otherwise. With `--verbose` the holding-line
+latency is reported as `holding-first=…ms`.
+
 ## Speech-to-speech (end to end)
 
 `--s2s` drives the full loop: mic -> VAD -> STT -> LLM -> Piper -> speaker.

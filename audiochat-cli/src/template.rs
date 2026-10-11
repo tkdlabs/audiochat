@@ -83,6 +83,12 @@ pub struct LlmTemplate {
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
+    /// Speak a short speculative holding line while the (thinking) model works.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_filler: Option<bool>,
+    /// Model id for the holding line; `None` uses the provider default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filler_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -188,6 +194,8 @@ impl LlmTemplate {
         fill(&mut self.url, other.url.as_ref());
         fill(&mut self.api_key, other.api_key.as_ref());
         fill(&mut self.thinking, other.thinking.as_ref());
+        fill(&mut self.thinking_filler, other.thinking_filler.as_ref());
+        fill(&mut self.filler_model, other.filler_model.as_ref());
         fill(&mut self.temperature, other.temperature.as_ref());
         fill(&mut self.num_ctx, other.num_ctx.as_ref());
     }
@@ -322,6 +330,12 @@ impl Template {
                 opts.llm_thinking = v;
             }
         }
+        if let Some(v) = self.llm.thinking_filler {
+            if v {
+                opts.thinking_filler = true;
+            }
+        }
+        fill(&mut opts.filler_model, self.llm.filler_model.as_ref());
         if let Some(v) = self.llm.temperature {
             if opts.llm_temperature.is_none() {
                 opts.llm_temperature = Some(v);
@@ -413,6 +427,8 @@ impl Template {
             url: opts.llm_url.clone(),
             api_key: None,
             thinking: Some(opts.llm_thinking),
+            thinking_filler: Some(opts.thinking_filler),
+            filler_model: opts.filler_model.clone(),
             temperature: opts.llm_temperature,
             num_ctx: opts.llm_num_ctx,
         };
@@ -625,6 +641,25 @@ mod tests {
         assert_eq!(template.stt.url.as_deref(), Some("http://gpu:8080"));
         assert_eq!(template.tts.voice.as_deref(), Some("Kept"));
         assert_eq!(template.tts.model.as_deref(), Some("qwen3-tts"));
+    }
+
+    #[test]
+    fn thinking_filler_round_trips_via_template() {
+        let opts = crate::parse_args(&[
+            "--thinking-filler".into(),
+            "--llm-thinking".into(),
+            "--filler-model".into(),
+            "flash".into(),
+        ])
+        .unwrap();
+        let template = Template::from_opts(&opts);
+        assert_eq!(template.llm.thinking_filler, Some(true));
+        assert_eq!(template.llm.filler_model.as_deref(), Some("flash"));
+
+        let mut restored = crate::parse_args(&[]).unwrap();
+        template.apply_to_opts(&mut restored);
+        assert!(restored.thinking_filler);
+        assert_eq!(restored.filler_model.as_deref(), Some("flash"));
     }
 
     #[test]

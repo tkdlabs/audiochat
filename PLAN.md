@@ -204,3 +204,26 @@ non-thinking) and an audio.cpp CUDA server on a remote GPU host.
   turn immediately instead of waiting out the pause, or submits a held question;
   the word is never sent to the LLM. A genuine question ending in the word is
   left intact. With `--barge-in`, the same word interrupts a spoken reply.
+
+## Iteration 3 — speculative holding line ✅
+
+Thinking models add latency before the first spoken token, leaving dead air in
+the speech-to-speech loop. With `--thinking-filler` (and `--llm-thinking`), the
+pipeline fires a **parallel, non-thinking** request to a fast OpenAI-compatible
+model that speaks a short holding line while the main model works:
+
+- `OpenAiCompatible` gained a **stateless** mode (`with_stateless`) that sends
+  only the system prompt plus the current prompt and neither reads nor writes
+  the conversation history, so a helper request never becomes a session turn.
+  A dedicated `FILLER_SYSTEM_PROMPT` instructs the helper to stall, not answer.
+- `Pipeline` grew a persistent `FillerWorker` thread that owns the helper client
+  and streams a line per turn. `respond` reads the main reply on a worker thread
+  so it can service the holding line and **pre-empt** it the instant the first
+  real token arrives: the line's playback is stopped (`sink.stop`, reusing the
+  barge-in path) and the helper request is cancelled. If the main model produces
+  no reply at all, the in-flight line is allowed to finish.
+- The helper defaults to `deepseek-v4.1-flash` for `opencode-go` and is skipped
+  when replies are silent or the provider is not OpenAI-compatible.
+- Templates/wizard carry `llm.thinking_filler` and `llm.filler_model`; the
+  per-turn log and `--verbose` output add a `holding-first=…ms` metric
+  (`filler_ms`).

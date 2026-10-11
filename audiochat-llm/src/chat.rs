@@ -11,6 +11,16 @@ Speak like a dialog partner, not a lecture. \
 Avoid headings, lists, and long-winded explanations. \
 Use one or two sentences unless the user explicitly asks for more detail.";
 
+/// System prompt for the speculative "holding line" model used to fill the
+/// silence while a slower thinking model works out the real answer. It must
+/// stall, not answer: the user is waiting, so a natural one-liner buys time.
+pub const FILLER_SYSTEM_PROMPT: &str = "\
+You are a voice assistant filling a brief silence while another model works out \
+the real answer. Do NOT answer the user's question and do not guess at it. \
+Reply with one short, natural spoken sentence (roughly 8 to 15 words) that \
+acknowledges the question and signals you are working on it. \
+No lists, no headings, no markdown.";
+
 /// A message in the conversation history (role + content).
 #[derive(Serialize, Clone)]
 pub struct ChatMessage {

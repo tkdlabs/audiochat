@@ -4,7 +4,7 @@ mod chat;
 mod ollama;
 mod openai;
 
-pub use chat::DEFAULT_SYSTEM_PROMPT;
+pub use chat::{DEFAULT_SYSTEM_PROMPT, FILLER_SYSTEM_PROMPT};
 pub use ollama::Ollama;
 pub use openai::OpenAiCompatible;
 

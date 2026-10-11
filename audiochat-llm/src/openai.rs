@@ -42,6 +42,10 @@ pub struct OpenAiCompatible {
     /// Thinking mode: `Some(false)` disables, `Some(true)` enables, `None` omits
     /// the field and leaves the server/model default.
     thinking: Option<bool>,
+    /// When set, send only the system prompt plus the current prompt and never
+    /// read or write the conversation history. Used for one-shot helper calls
+    /// (e.g. the speculative holding line) that must not pollute the session.
+    stateless: bool,
 }
 
 /// Request body for `/chat/completions`.
@@ -137,6 +141,7 @@ impl OpenAiCompatible {
             system: Some(DEFAULT_SYSTEM_PROMPT.to_string()),
             temperature: None,
             thinking: None,
+            stateless: false,
         }
     }
 
@@ -185,6 +190,28 @@ impl OpenAiCompatible {
         self
     }
 
+    /// Run without conversation history: each request sends only the system
+    /// prompt and the current prompt, and nothing is retained between calls.
+    /// Intended for one-shot helper calls that must not affect the session.
+    pub fn with_stateless(mut self, stateless: bool) -> Self {
+        self.stateless = stateless;
+        self
+    }
+
+    /// Build the messages for one request, honouring stateless mode.
+    fn request_messages(&self, prompt: &str) -> Vec<ChatMessage> {
+        if self.stateless {
+            let mut messages = Vec::new();
+            if let Some(system) = self.system.as_deref() {
+                messages.push(ChatMessage::system(system));
+            }
+            messages.push(ChatMessage::user(prompt));
+            return messages;
+        }
+        let history = self.history.lock().map(|h| h.clone()).unwrap_or_default();
+        build_request_messages(&history, prompt, self.system.as_deref(), self.max_turns)
+    }
+
     /// Number of conversation turns (user+assistant pairs) retained.
     pub fn max_turns(&self) -> usize {
         self.max_turns
@@ -218,10 +245,7 @@ impl Llm for OpenAiCompatible {
     fn generate(&self, prompt: &str) -> Result<LlmResponse, Box<dyn Error + Send + Sync>> {
         // Snapshot the history plus the new user turn; the persistent history is
         // only committed once the request is accepted, so retries don't duplicate.
-        let messages = {
-            let history = self.history.lock().map(|h| h.clone()).unwrap_or_default();
-            build_request_messages(&history, prompt, self.system.as_deref(), self.max_turns)
-        };
+        let messages = self.request_messages(prompt);
 
         let url = format!("{}/chat/completions", self.base_url);
         let body = ChatRequest {
@@ -267,17 +291,23 @@ impl Llm for OpenAiCompatible {
         }
 
         // Accepted: commit the user turn. The assistant turn is appended as the
-        // stream is read (or on drop if interrupted).
-        if let Ok(mut h) = self.history.lock() {
-            h.push(ChatMessage::user(prompt));
-        }
-        self.trim_history();
+        // stream is read (or on drop if interrupted). Stateless calls leave the
+        // history untouched so a helper request never becomes a session turn.
+        let history = if self.stateless {
+            None
+        } else {
+            if let Ok(mut h) = self.history.lock() {
+                h.push(ChatMessage::user(prompt));
+            }
+            self.trim_history();
+            Some(self.history.clone())
+        };
 
         let reader = BufReader::new(resp.into_body().into_reader());
         let stream = OpenAiStream {
             reader,
             accum: String::new(),
-            history: Some(self.history.clone()),
+            history,
         };
         Ok(LlmResponse {
             stream: Some(Box::new(stream)),
@@ -446,6 +476,37 @@ mod tests {
             .unwrap()
             .content;
         assert_eq!(text, None);
+    }
+
+    #[test]
+    fn stateful_request_includes_history_and_system() {
+        let client = OpenAiCompatible::with_base("http://localhost/v1", "m");
+        {
+            let mut h = client.history.lock().unwrap();
+            h.push(ChatMessage::user("old"));
+            h.push(ChatMessage::assistant("reply"));
+        }
+        let messages = client.request_messages("new");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[1].content, "old");
+        assert_eq!(messages[3].content, "new");
+    }
+
+    #[test]
+    fn stateless_request_omits_history_and_keeps_it_untouched() {
+        let client = OpenAiCompatible::with_base("http://localhost/v1", "m").with_stateless(true);
+        {
+            let mut h = client.history.lock().unwrap();
+            h.push(ChatMessage::user("old"));
+            h.push(ChatMessage::assistant("reply"));
+        }
+        let messages = client.request_messages("new");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[1].content, "new");
+        assert_eq!(client.history_len(), 2);
     }
 
     #[test]

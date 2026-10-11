@@ -15,7 +15,7 @@ use audiochat_core::{
     AudioConfig, AudioSink, ConversationLogger, EnergyVad, Llm, MicCapture, Pipeline, Session,
     SpeechRecognizer, TextToSpeech,
 };
-use audiochat_llm::{opencode_go_api_key, Ollama, OpenAiCompatible};
+use audiochat_llm::{opencode_go_api_key, Ollama, OpenAiCompatible, FILLER_SYSTEM_PROMPT};
 use audiochat_stt_audiocpp::AudioCppStt;
 use audiochat_stt_whisper::WhisperRecognizer;
 use audiochat_tts_audiocpp::AudioCppTts;
@@ -50,6 +50,11 @@ Options:
                       https://opencode.ai/zen/go/v1).
   --llm-api-key KEY   Bearer token for OpenAI-compatible backends (or env).
   --llm-thinking      Enable reasoning/thinking mode (default: off).
+  --thinking-filler   With --llm-thinking, speak a short speculative holding
+                      line while the main model thinks, pre-empted by the real
+                      reply. Needs an OpenAI-compatible provider.
+  --filler-model NAME Model for the holding line (openai-compatible backends);
+                      opencode-go defaults to deepseek-v4.1-flash.
   --llm-temperature F Sampling temperature (0..2); default is the model's.
   --llm-num-ctx N     Context window size in tokens; default is the model's.
   --system-prompt P   Override the default assistant system prompt (spoken style).
@@ -117,6 +122,8 @@ Environment (flag takes precedence):
   AUDIOCHAT_LLM_API_KEY   bearer token (falls back to OPENCODE_API_KEY, then
                           opencode's auth.json for the opencode-go provider)
   AUDIOCHAT_LLM_THINKING  set to 1/true to enable thinking mode
+  AUDIOCHAT_THINKING_FILLER set to 1/true to enable the speculative holding line
+  AUDIOCHAT_FILLER_MODEL  model id for the holding line
   AUDIOCHAT_PAUSE         endpointer pause window (ms)
   AUDIOCHAT_STOP_WORD     spoken stop word (default: stop)";
 
@@ -140,6 +147,8 @@ struct Opts {
     llm_url: Option<String>,
     llm_api_key: Option<String>,
     llm_thinking: bool,
+    thinking_filler: bool,
+    filler_model: Option<String>,
     llm_temperature: Option<f32>,
     llm_num_ctx: Option<u32>,
     s2s: bool,
@@ -212,6 +221,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut llm_url: Option<String> = None;
     let mut llm_api_key: Option<String> = None;
     let mut llm_thinking = false;
+    let mut thinking_filler = false;
+    let mut filler_model: Option<String> = None;
     let mut llm_temperature: Option<f32> = None;
     let mut llm_num_ctx: Option<u32> = None;
     let mut s2s = false;
@@ -296,6 +307,12 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 llm_api_key = Some(k.clone());
             }
             "--llm-thinking" => llm_thinking = true,
+            "--thinking-filler" => thinking_filler = true,
+            "--filler-model" => {
+                i += 1;
+                let name = args.get(i).ok_or("--filler-model requires a name")?;
+                filler_model = Some(name.clone());
+            }
             "--llm-temperature" => {
                 i += 1;
                 let s = args.get(i).ok_or("--llm-temperature requires a value")?;
@@ -455,6 +472,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         llm_url: opt_or_env(llm_url, "AUDIOCHAT_LLM_URL"),
         llm_api_key: opt_or_env(llm_api_key, "AUDIOCHAT_LLM_API_KEY"),
         llm_thinking: llm_thinking || env_flag("AUDIOCHAT_LLM_THINKING"),
+        thinking_filler: thinking_filler || env_flag("AUDIOCHAT_THINKING_FILLER"),
+        filler_model: opt_or_env(filler_model, "AUDIOCHAT_FILLER_MODEL"),
         llm_temperature: opt_float_or_env(llm_temperature, "AUDIOCHAT_LLM_TEMPERATURE"),
         llm_num_ctx: opt_u32_or_env(llm_num_ctx, "AUDIOCHAT_LLM_NUM_CTX"),
         s2s,
@@ -601,6 +620,57 @@ fn build_llm(opts: &Opts) -> Result<Box<dyn Llm>, Box<dyn std::error::Error + Se
     }
 }
 
+/// Build the speculative "holding line" client, if enabled. It is a stateless,
+/// non-thinking OpenAI-compatible client that fills the silence while the main
+/// thinking model works; the first real reply token pre-empts it.
+fn build_filler(opts: &Opts) -> Option<Box<dyn Llm + Send>> {
+    if !opts.thinking_filler {
+        return None;
+    }
+    if !opts.llm_thinking {
+        eprintln!("audiochat: --thinking-filler needs --llm-thinking; ignoring");
+        return None;
+    }
+    let provider = llm_provider(opts);
+    if !matches!(provider, "openai" | "opencode-go") {
+        eprintln!("audiochat: --thinking-filler needs an OpenAI-compatible provider; ignoring");
+        return None;
+    }
+    let base = match opts.llm_url.clone() {
+        Some(url) => url,
+        None if provider == "opencode-go" => OPENCODE_GO_URL.to_string(),
+        None => {
+            eprintln!("audiochat: --thinking-filler needs --llm-url for the openai provider");
+            return None;
+        }
+    };
+    let model = opts
+        .filler_model
+        .clone()
+        .or_else(|| (provider == "opencode-go").then(|| OPENCODE_GO_DEFAULT_MODEL.to_string()));
+    let Some(model) = model.filter(|m| !m.trim().is_empty()) else {
+        eprintln!("audiochat: --thinking-filler needs --filler-model for the openai provider");
+        return None;
+    };
+
+    let mut client = OpenAiCompatible::with_base(base, model)
+        .with_stateless(true)
+        .with_thinking(Some(false))
+        .with_system_prompt(Some(FILLER_SYSTEM_PROMPT))
+        .with_temperature(Some(0.6));
+    let key = opts.llm_api_key.clone().or_else(|| {
+        if provider == "opencode-go" {
+            opencode_go_api_key()
+        } else {
+            None
+        }
+    });
+    if let Some(key) = key {
+        client = client.with_api_key(key);
+    }
+    Some(Box::new(client))
+}
+
 /// Build the TTS engine selected by `--tts-backend`.
 fn build_tts(
     opts: &Opts,
@@ -713,7 +783,7 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     let tts = build_tts(opts)?;
     let stt = build_stt(opts)?;
 
-    let mut pipeline = Pipeline::new(llm, tts);
+    let mut pipeline = Pipeline::new(llm, tts).with_filler(build_filler(opts));
     pipeline.speak_replies = !opts.silent;
     pipeline.verbose = opts.verbose;
     if let Some(path) = &opts.conversation_log {
@@ -874,5 +944,63 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         run_tts(&opts)
     } else {
         run_stt(&opts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(args: &[&str]) -> Opts {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        parse_args(&args).unwrap()
+    }
+
+    #[test]
+    fn parses_thinking_filler_flags() {
+        let o = opts(&["--thinking-filler", "--filler-model", "flash"]);
+        assert!(o.thinking_filler);
+        assert_eq!(o.filler_model.as_deref(), Some("flash"));
+    }
+
+    #[test]
+    fn filler_needs_thinking_enabled() {
+        let o = opts(&["--thinking-filler", "--llm-provider", "opencode-go"]);
+        assert!(build_filler(&o).is_none());
+    }
+
+    #[test]
+    fn filler_needs_openai_compatible_provider() {
+        let o = opts(&[
+            "--thinking-filler",
+            "--llm-thinking",
+            "--llm-provider",
+            "ollama",
+        ]);
+        assert!(build_filler(&o).is_none());
+    }
+
+    #[test]
+    fn filler_defaults_to_flash_for_opencode_go() {
+        let o = opts(&[
+            "--thinking-filler",
+            "--llm-thinking",
+            "--llm-provider",
+            "opencode-go",
+        ]);
+        assert!(build_filler(&o).is_some());
+    }
+
+    #[test]
+    fn openai_filler_needs_a_model() {
+        let o = opts(&[
+            "--thinking-filler",
+            "--llm-thinking",
+            "--llm-provider",
+            "openai",
+            "--llm-url",
+            "http://localhost:8000/v1",
+        ]);
+        assert!(build_filler(&o).is_none());
     }
 }

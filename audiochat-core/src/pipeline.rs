@@ -2,13 +2,19 @@
 
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::audio_sink::AudioSink;
 use crate::config::AudioConfig;
 use crate::conversation::ConversationLogger;
-use crate::traits::{Llm, TextToSpeech};
+use crate::traits::{Llm, LlmStream, LlmStreamItem, TextToSpeech};
+
+/// How often the main thread polls while a speculative holding line is active,
+/// so it can pre-empt it the instant the real reply starts. Small enough to be
+/// imperceptible, large enough to avoid a busy loop.
+const FILLER_POLL_MS: u64 = 2;
 
 /// Minimum characters before a clause boundary (comma, etc.) triggers a flush,
 /// so we don't fragment into tiny, unnaturally-intoned chunks.
@@ -88,6 +94,22 @@ fn with_retry<T>(
     Err(last_msg.unwrap_or_else(|| format!("{what} failed")).into())
 }
 
+/// Read an LLM reply stream on a worker thread, forwarding each item to the
+/// returned channel. This lets the main thread keep servicing a speculative
+/// holding line while it waits for the first reply token. The thread exits when
+/// the stream ends or the receiver is dropped (e.g. the turn was interrupted).
+fn spawn_stream_reader(mut stream: LlmStream) -> mpsc::Receiver<LlmStreamItem> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for item in stream.by_ref() {
+            if tx.send(item).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
 /// Speech-side timing measured before the LLM runs, all in milliseconds and
 /// relative to the true end of the user's speech.
 #[derive(Debug, Clone, Copy, Default)]
@@ -121,20 +143,29 @@ pub struct TurnTiming {
     pub first_audio_ms: u64,
     /// End of speech -> last token received (full reply streamed).
     pub full_stream_ms: u64,
+    /// End of speech -> first speculative holding-line audio enqueued (0 when
+    /// no holding line was spoken).
+    pub filler_ms: u64,
     /// End of speech -> last audio enqueued (whole reply spoken/printed).
     pub total_ms: u64,
 }
 
 impl TurnTiming {
     fn print(&self) {
+        let filler = if self.filler_ms > 0 {
+            format!(" holding-first={}ms", self.filler_ms)
+        } else {
+            String::new()
+        };
         eprintln!(
-            "  └ latency: endpoint={}ms (vad={} stt={}) first-token={}ms tts-first={}ms first-audio={}ms stream={}ms total={}ms",
+            "  └ latency: endpoint={}ms (vad={} stt={}) first-token={}ms tts-first={}ms first-audio={}ms{} stream={}ms total={}ms",
             self.endpoint_ms,
             self.vad_ms,
             self.stt_ms,
             self.first_token_ms,
             self.tts_first_ms,
             self.first_audio_ms,
+            filler,
             self.full_stream_ms,
             self.total_ms
         );
@@ -161,6 +192,85 @@ pub struct Pipeline {
     /// Optional conversation log writer. Each completed turn is appended as a
     /// single JSON line when enabled.
     conversation_log: Option<ConversationLogger>,
+    /// Optional worker that generates a speculative "holding line" in parallel
+    /// with the main (thinking) model, so the user hears something while it
+    /// works. The line is pre-empted by the first real reply token.
+    filler: Option<FillerWorker>,
+}
+
+/// A job for the holding-line worker: the user's question plus a per-turn
+/// cancel flag and the channel the streamed line is sent back on.
+struct FillerJob {
+    question: String,
+    cancel: Arc<AtomicBool>,
+    tx: mpsc::Sender<String>,
+}
+
+/// Owns a persistent worker thread and its LLM client, so a speculative
+/// holding line can be requested per turn without rebuilding the client.
+struct FillerWorker {
+    jobs: mpsc::Sender<FillerJob>,
+}
+
+impl FillerWorker {
+    /// Spawn the worker thread, moving the (stateless) filler client into it.
+    fn start(filler: Box<dyn Llm + Send>) -> Self {
+        let (jobs, rx) = mpsc::channel::<FillerJob>();
+        std::thread::spawn(move || filler_loop(filler, rx));
+        Self { jobs }
+    }
+
+    /// Request a holding line for `question`. Returns the receiver the streamed
+    /// text arrives on, or `None` if the worker has gone away.
+    fn request(&self, question: &str, cancel: Arc<AtomicBool>) -> Option<mpsc::Receiver<String>> {
+        let (tx, rx) = mpsc::channel();
+        self.jobs
+            .send(FillerJob {
+                question: question.to_string(),
+                cancel,
+                tx,
+            })
+            .ok()?;
+        Some(rx)
+    }
+}
+
+/// Stream a holding line for each job until the channel closes. Stops early
+/// when a job is cancelled (the real reply started, or the user barged in).
+fn filler_loop(filler: Box<dyn Llm + Send>, jobs: mpsc::Receiver<FillerJob>) {
+    while let Ok(job) = jobs.recv() {
+        if job.cancel.load(Ordering::Relaxed) {
+            continue;
+        }
+        let mut resp = match filler.generate(&job.question) {
+            Ok(resp) => resp,
+            Err(e) => {
+                eprintln!("audiochat: holding-line request failed: {e}");
+                continue;
+            }
+        };
+        if let Some(stream) = resp.stream.take() {
+            for item in stream {
+                if job.cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                match item {
+                    Ok(text) => {
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+                        if job.tx.send(text).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        } else if !resp.full.trim().is_empty() {
+            let _ = job.tx.send(resp.full);
+        }
+        // Dropping `job.tx` signals end-of-line (Disconnected) to the consumer.
+    }
 }
 
 impl Pipeline {
@@ -175,6 +285,7 @@ impl Pipeline {
             gate: None,
             barge: None,
             conversation_log: None,
+            filler: None,
         }
     }
 
@@ -196,6 +307,13 @@ impl Pipeline {
     /// appended as a JSON line to the log file.
     pub fn with_conversation_log(mut self, log: Option<ConversationLogger>) -> Self {
         self.conversation_log = log;
+        self
+    }
+
+    /// Attach a filler LLM used to speak a short speculative holding line while
+    /// the main model is working. The line is pre-empted by the real reply.
+    pub fn with_filler(mut self, filler: Option<Box<dyn Llm + Send>>) -> Self {
+        self.filler = filler.map(FillerWorker::start);
         self
     }
 
@@ -260,8 +378,54 @@ impl Pipeline {
         let mut saw_first_token = false;
         let mut saw_first_audio = false;
 
-        if let Some(stream) = resp.stream.take() {
-            for item in stream {
+        // Speculative holding line: while the main (thinking) model works, a
+        // fast non-thinking model speaks a short filler that the first real
+        // token pre-empts. Only useful when replies are actually spoken.
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut filler_rx = if self.speak_replies {
+            self.filler
+                .as_ref()
+                .and_then(|w| w.request(question, Arc::clone(&cancel)))
+        } else {
+            None
+        };
+        let mut filler_segment = String::new();
+        let mut filler_text = String::new();
+        let mut saw_filler = false;
+
+        // Read the reply on a worker thread so the main thread can keep
+        // servicing the holding line while it waits for the first token.
+        let stream = resp
+            .stream
+            .take()
+            .unwrap_or_else(|| Box::new(std::iter::empty()) as LlmStream);
+        let main_rx = spawn_stream_reader(stream);
+
+        loop {
+            // Prefer the real reply: once it starts, the holding line is moot.
+            let main_item = if filler_rx.is_some() {
+                match main_rx.recv_timeout(std::time::Duration::from_millis(FILLER_POLL_MS)) {
+                    Ok(item) => Some(item),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            } else {
+                match main_rx.recv() {
+                    Ok(item) => Some(item),
+                    Err(_) => break,
+                }
+            };
+
+            if let Some(item) = main_item {
+                if filler_rx.take().is_some() {
+                    cancel.store(true, Ordering::Relaxed);
+                    if let Some(sink) = &self.sink {
+                        sink.stop();
+                    }
+                    if self.verbose && !filler_text.is_empty() {
+                        eprintln!("audiochat: holding line pre-empted: {}", filler_text.trim());
+                    }
+                }
                 if self.handle_barge() {
                     if !reply.is_empty() {
                         println!();
@@ -298,9 +462,79 @@ impl Pipeline {
                         saw_first_audio = true;
                     }
                 }
+            } else {
+                // Main reply is still silent: speak whatever holding line we have.
+                match filler_rx.as_ref().map(|rx| rx.try_recv()) {
+                    Some(Ok(text)) => {
+                        filler_segment.push_str(&text);
+                        filler_text.push_str(&text);
+                        loop {
+                            let (chunk, rest) = take_chunk(&filler_segment);
+                            if chunk.is_empty() {
+                                break;
+                            }
+                            filler_segment = rest;
+                            if self.handle_barge() {
+                                cancel.store(true, Ordering::Relaxed);
+                                return Ok(None);
+                            }
+                            self.synthesize_and_play(&chunk)?;
+                            if !saw_filler {
+                                timing.filler_ms = start.elapsed().as_millis() as u64;
+                                saw_filler = true;
+                            }
+                        }
+                    }
+                    Some(Err(mpsc::TryRecvError::Empty)) => {}
+                    Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                        if !filler_segment.trim().is_empty() {
+                            let rest = std::mem::take(&mut filler_segment);
+                            self.synthesize_and_play(&rest)?;
+                            if !saw_filler {
+                                timing.filler_ms = start.elapsed().as_millis() as u64;
+                                saw_filler = true;
+                            }
+                        }
+                        if self.verbose && !filler_text.is_empty() {
+                            eprintln!("audiochat: holding line: {}", filler_text.trim());
+                        }
+                        filler_rx = None;
+                    }
+                    None => {}
+                }
             }
         }
         timing.full_stream_ms = start.elapsed().as_millis() as u64;
+
+        // If the main stream produced no reply, let any in-flight holding line
+        // finish rather than leaving dead air.
+        if reply.trim().is_empty() {
+            if let Some(rx) = filler_rx.take() {
+                while let Ok(text) = rx.recv() {
+                    filler_segment.push_str(&text);
+                    filler_text.push_str(&text);
+                    loop {
+                        let (chunk, rest) = take_chunk(&filler_segment);
+                        if chunk.is_empty() {
+                            break;
+                        }
+                        filler_segment = rest;
+                        self.synthesize_and_play(&chunk)?;
+                        if !saw_filler {
+                            timing.filler_ms = start.elapsed().as_millis() as u64;
+                            saw_filler = true;
+                        }
+                    }
+                }
+                if !filler_segment.trim().is_empty() {
+                    self.synthesize_and_play(&filler_segment)?;
+                    if !saw_filler {
+                        timing.filler_ms = start.elapsed().as_millis() as u64;
+                        saw_filler = true;
+                    }
+                }
+            }
+        }
 
         if !segment.trim().is_empty() {
             let tts_ms = self.synthesize_and_play(&segment)?;
@@ -313,12 +547,12 @@ impl Pipeline {
             println!();
         }
         timing.total_ms = start.elapsed().as_millis() as u64;
-        if self.verbose && !reply.is_empty() {
+        if self.verbose && (!reply.is_empty() || saw_filler) {
             timing.print();
         }
 
         let did_reply = !reply.is_empty();
-        if did_reply {
+        if saw_first_audio || saw_filler {
             // Audio may still be draining from the last enqueue; keep the gate
             // engaged until everything has finished playing, but allow the user
             // to interrupt (barge-in) while we wait.
@@ -347,6 +581,7 @@ impl Pipeline {
                     first_token_ms: timing.first_token_ms,
                     tts_first_ms: timing.tts_first_ms,
                     first_audio_ms: timing.first_audio_ms,
+                    filler_ms: timing.filler_ms,
                     stream_ms: timing.full_stream_ms,
                     total_ms: timing.total_ms,
                 },

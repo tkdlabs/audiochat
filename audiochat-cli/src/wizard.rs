@@ -283,6 +283,27 @@ fn ask_llm(baseline: &LlmTemplate) -> Result<LlmTemplate, InquireError> {
         }
     }
 
+    if llm.thinking == Some(true) {
+        let enabled = Confirm::new("Speak a short holding line while the model thinks?")
+            .with_default(baseline.thinking_filler.unwrap_or(true))
+            .with_help_message(
+                "a fast non-thinking model fills the silence, pre-empted by the reply",
+            )
+            .prompt()?;
+        llm.thinking_filler = Some(enabled);
+        llm.filler_model = if enabled {
+            text_optional(
+                "Holding-line model (blank = provider default):",
+                baseline.filler_model.as_deref(),
+            )?
+        } else {
+            None
+        };
+    } else {
+        llm.thinking_filler = None;
+        llm.filler_model = None;
+    }
+
     llm.temperature = optional_number::<f32>(
         "Sampling temperature 0..2 (blank = model default):",
         baseline.temperature,
@@ -416,8 +437,13 @@ fn describe(t: &Template) -> String {
     } else {
         ""
     };
+    let filler = if t.llm.thinking_filler == Some(true) {
+        " +holding line"
+    } else {
+        ""
+    };
     format!(
-        "Summary\n  STT: {stt}{}\n  TTS: {tts}{}\n  LLM: {llm}{api_key}{}\n  Prompt: {prompt}{}",
+        "Summary\n  STT: {stt}{}\n  TTS: {tts}{}\n  LLM: {llm}{api_key}{}{filler}\n  Prompt: {prompt}{}",
         model_suffix(stt, &t.stt.model, &t.stt.url),
         model_suffix(tts, &t.tts.model, &t.tts.url),
         model_suffix(llm, &t.llm.model, &t.llm.url),

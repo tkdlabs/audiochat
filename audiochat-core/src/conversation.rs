@@ -44,6 +44,8 @@ pub struct Timing {
     pub tts_first_ms: u64,
     /// End of speech -> first audio enqueued.
     pub first_audio_ms: u64,
+    /// End of speech -> first speculative holding-line audio (0 when none).
+    pub filler_ms: u64,
     /// End of speech -> last token.
     pub stream_ms: u64,
     /// End of speech -> last audio enqueued.
@@ -107,6 +109,7 @@ mod tests {
             first_token_ms: 120,
             tts_first_ms: 180,
             first_audio_ms: 250,
+            filler_ms: 0,
             stream_ms: 400,
             total_ms: 900,
         };
