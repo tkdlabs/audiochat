@@ -196,6 +196,9 @@ pub struct Pipeline {
     /// with the main (thinking) model, so the user hears something while it
     /// works. The line is pre-empted by the first real reply token.
     filler: Option<FillerWorker>,
+    /// Completed `(question, reply)` turns for this session, used to update
+    /// persistent memory when the session ends.
+    turns: Vec<(String, String)>,
 }
 
 /// A job for the holding-line worker: the user's question plus a per-turn
@@ -286,7 +289,13 @@ impl Pipeline {
             barge: None,
             conversation_log: None,
             filler: None,
+            turns: Vec::new(),
         }
+    }
+
+    /// Take the completed `(question, reply)` turns recorded this session.
+    pub fn take_turns(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.turns)
     }
 
     /// Attach a playback gate flag. The pipeline sets it `true` while audio
@@ -552,6 +561,9 @@ impl Pipeline {
         }
 
         let did_reply = !reply.is_empty();
+        if did_reply {
+            self.turns.push((question.to_string(), reply.clone()));
+        }
         if saw_first_audio || saw_filler {
             // Audio may still be draining from the last enqueue; keep the gate
             // engaged until everything has finished playing, but allow the user

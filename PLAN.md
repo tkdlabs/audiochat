@@ -227,3 +227,26 @@ model that speaks a short holding line while the main model works:
 - Templates/wizard carry `llm.thinking_filler` and `llm.filler_model`; the
   per-turn log and `--verbose` output add a `holding-first=…ms` metric
   (`filler_ms`).
+
+## Iteration 4 — persistent memory ✅
+
+Optional, per-profile long-term memory (`--memory`) so the assistant recalls
+earlier conversations:
+
+- `audiochat-core::memory` defines the store (`Memory`), per-category limits
+  (`MemoryLimits`), Markdown/JSON rendering, and an `update` that asks a
+  summarizer model for an updated JSON store. Three categories with independent
+  expiry: `recent` (count-based, newest N), `fundamental` (permanent, strict
+  character cap), and `todo` (time-based TTL + count). `sanitize` enforces every
+  limit/expiry in code rather than trusting the model.
+- Memory is keyed by an explicit **profile** (`memory.profile`, defaulting to the
+  template name) and stored under `<config_dir>/memory/<profile>.json`, separate
+  from the template so user edits never clobber it. Templates and the wizard
+  carry the settings; flags/env (`AUDIOCHAT_MEMORY*`) override.
+- At startup the store is rendered into `opts.system_prompt` (Markdown by
+  default, JSON optional); at the end of an `--s2s` session the completed turns
+  (collected by `Pipeline` and returned by `Session::run`) are sent to a
+  stateless summarizer (`build_memory_llm`, reusing the holding-line pattern).
+  `--show-memory`/`--forget-memory` inspect and clear a profile.
+- Injection is best-effort: with no summarizer model the existing memory is still
+  used but not rewritten; a malformed summarizer reply leaves the store intact.

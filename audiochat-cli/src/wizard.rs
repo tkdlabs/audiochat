@@ -4,7 +4,9 @@
 use inquire::{Confirm, Editor, InquireError, Select, Text};
 
 use crate::discover::{self, ModelOption};
-use crate::template::{AudioTemplate, LlmTemplate, SttTemplate, Template, TtsTemplate};
+use crate::template::{
+    AudioTemplate, LlmTemplate, MemoryTemplate, SttTemplate, Template, TtsTemplate,
+};
 use crate::{
     DEFAULT_AUDIOCPP_MODEL, DEFAULT_AUDIOCPP_STT_MODEL, DEFAULT_AUDIOCPP_URL,
     DEFAULT_AUDIOCPP_VOICE, DEFAULT_OLLAMA_URL, OPENCODE_GO_DEFAULT_MODEL, OPENCODE_GO_URL,
@@ -48,6 +50,7 @@ fn wizard_inner(baseline: &Template) -> Result<WizardOutcome, InquireError> {
     let tts = ask_tts(&baseline.tts)?;
     let llm = ask_llm(&baseline.llm)?;
     let system_prompt = ask_system_prompt(baseline.system_prompt.as_deref())?;
+    let memory = ask_memory(&baseline.memory, baseline.name.as_deref())?;
     let device = text_optional("Input device (blank = default)", baseline.device.as_deref())?;
     let audio = ask_advanced(&baseline.audio)?;
 
@@ -61,6 +64,7 @@ fn wizard_inner(baseline: &Template) -> Result<WizardOutcome, InquireError> {
         system_prompt,
         device,
         audio,
+        memory,
     };
 
     println!("\n{}", describe(&template));
@@ -362,6 +366,70 @@ fn ask_system_prompt(baseline: Option<&str>) -> Result<Option<String>, InquireEr
     }
 }
 
+fn ask_memory(
+    baseline: &MemoryTemplate,
+    template_name: Option<&str>,
+) -> Result<MemoryTemplate, InquireError> {
+    let enabled = Confirm::new("Enable persistent memory (recall past conversations)?")
+        .with_default(baseline.enabled.unwrap_or(false))
+        .with_help_message("summaries are stored per profile under the config dir")
+        .prompt()?;
+    if !enabled {
+        return Ok(MemoryTemplate {
+            enabled: Some(false),
+            ..baseline.clone()
+        });
+    }
+
+    let default_profile = baseline
+        .profile
+        .clone()
+        .or_else(|| template_name.map(str::to_string))
+        .unwrap_or_else(|| "default".to_string());
+    let profile = text("Memory profile name:", Some(&default_profile))?;
+
+    let formats = ["md", "json"];
+    let fmt_default = usize::from(baseline.format.as_deref() == Some("json"));
+    let format =
+        formats[select_index("Memory injection format:", &formats, fmt_default)?].to_string();
+
+    let model = text_optional(
+        "Summarizer model (blank = holding-line/provider default):",
+        baseline.model.as_deref(),
+    )?;
+    let recent_max = optional_number::<usize>(
+        "Recent-chat summaries to keep (blank = 8):",
+        baseline.recent_max,
+        "5-10 works well",
+    )?;
+    let fundamental_max_chars = optional_number::<usize>(
+        "Durable-facts character cap (blank = 1200):",
+        baseline.fundamental_max_chars,
+        "strict limit on stable memory",
+    )?;
+    let todo_ttl_days = optional_number::<u64>(
+        "Follow-up expiry in days (blank = 14):",
+        baseline.todo_ttl_days,
+        "unresolved follow-ups are dropped after this",
+    )?;
+    let todo_max = optional_number::<usize>(
+        "Follow-ups to keep (blank = 10):",
+        baseline.todo_max,
+        "cap on open items",
+    )?;
+
+    Ok(MemoryTemplate {
+        enabled: Some(true),
+        profile: Some(profile),
+        format: Some(format),
+        model,
+        recent_max,
+        fundamental_max_chars,
+        todo_ttl_days,
+        todo_max,
+    })
+}
+
 fn ask_advanced(baseline: &AudioTemplate) -> Result<AudioTemplate, InquireError> {
     let customize = Confirm::new("Configure advanced audio / turn-taking options?")
         .with_default(false)
@@ -442,8 +510,15 @@ fn describe(t: &Template) -> String {
     } else {
         ""
     };
+    let memory = if t.memory.enabled == Some(true) {
+        let profile = t.memory.profile.as_deref().unwrap_or("default");
+        let format = t.memory.format.as_deref().unwrap_or("md");
+        format!(" +memory:{profile} ({format})")
+    } else {
+        String::new()
+    };
     format!(
-        "Summary\n  STT: {stt}{}\n  TTS: {tts}{}\n  LLM: {llm}{api_key}{}{filler}\n  Prompt: {prompt}{}",
+        "Summary\n  STT: {stt}{}\n  TTS: {tts}{}\n  LLM: {llm}{api_key}{}{filler}{memory}\n  Prompt: {prompt}{}",
         model_suffix(stt, &t.stt.model, &t.stt.url),
         model_suffix(tts, &t.tts.model, &t.tts.url),
         model_suffix(llm, &t.llm.model, &t.llm.url),

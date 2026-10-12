@@ -12,10 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use audiochat_core::{
-    AudioConfig, AudioSink, ConversationLogger, EnergyVad, Llm, MicCapture, Pipeline, Session,
-    SpeechRecognizer, TextToSpeech,
+    AudioConfig, AudioSink, ConversationLogger, EnergyVad, Llm, Memory, MemoryFormat, MemoryLimits,
+    MicCapture, Pipeline, Session, SpeechRecognizer, TextToSpeech,
 };
-use audiochat_llm::{opencode_go_api_key, Ollama, OpenAiCompatible, FILLER_SYSTEM_PROMPT};
+use audiochat_llm::{
+    opencode_go_api_key, Ollama, OpenAiCompatible, DEFAULT_SYSTEM_PROMPT, FILLER_SYSTEM_PROMPT,
+};
 use audiochat_stt_audiocpp::AudioCppStt;
 use audiochat_stt_whisper::WhisperRecognizer;
 use audiochat_tts_audiocpp::AudioCppTts;
@@ -81,6 +83,20 @@ Options:
                       a deliberate stop.
   --conversation-log F Write each turn as a JSON line to F (JSONL).
                       AUDIOCHAT_CONVERSATION_LOG is the env fallback.
+  --memory            Load persistent memory into the prompt and rewrite it from
+                      the session at exit (default: off).
+  --no-memory         Disable persistent memory.
+  --memory-profile N  Memory profile to read/write (default: template name or
+                      'default'). Stores live in <config>/memory/<profile>.json.
+  --memory-format F   Inject memory as 'md' (default) or 'json'.
+  --memory-model N    Summarizer model (default: holding-line model, then the
+                      provider default).
+  --memory-recent N   Recent-chat summaries retained (default: 8).
+  --memory-fundamental-chars N  Durable-facts character cap (default: 1200).
+  --memory-todo-ttl-days N      Follow-up expiry in days (default: 14).
+  --memory-todo-max N Follow-ups retained (default: 10).
+  --show-memory       Print the profile's memory (Markdown) and exit.
+  --forget-memory     Delete the profile's memory store and exit.
   -v, --verbose       Print per-turn latency metrics in --s2s.
   --silent            In --s2s, print replies but do not speak them.
 
@@ -125,7 +141,15 @@ Environment (flag takes precedence):
   AUDIOCHAT_THINKING_FILLER set to 1/true to enable the speculative holding line
   AUDIOCHAT_FILLER_MODEL  model id for the holding line
   AUDIOCHAT_PAUSE         endpointer pause window (ms)
-  AUDIOCHAT_STOP_WORD     spoken stop word (default: stop)";
+  AUDIOCHAT_STOP_WORD     spoken stop word (default: stop)
+  AUDIOCHAT_MEMORY        set to 1/true to enable persistent memory
+  AUDIOCHAT_MEMORY_PROFILE   memory profile name
+  AUDIOCHAT_MEMORY_FORMAT    memory injection format: md or json
+  AUDIOCHAT_MEMORY_MODEL     summarizer model id
+  AUDIOCHAT_MEMORY_RECENT    recent-chat summaries retained
+  AUDIOCHAT_MEMORY_FUNDAMENTAL_CHARS  durable-facts character cap
+  AUDIOCHAT_MEMORY_TODO_TTL_DAYS      follow-up expiry in days
+  AUDIOCHAT_MEMORY_TODO_MAX  follow-ups retained";
 
 struct Opts {
     model: Option<PathBuf>,
@@ -164,6 +188,16 @@ struct Opts {
     barge_threshold: Option<f32>,
     conversation_log: Option<String>,
     system_prompt: Option<String>,
+    memory_enabled: Option<bool>,
+    memory_profile: Option<String>,
+    memory_format: Option<String>,
+    memory_model: Option<String>,
+    memory_recent: Option<usize>,
+    memory_fundamental_chars: Option<usize>,
+    memory_todo_ttl_days: Option<u64>,
+    memory_todo_max: Option<usize>,
+    show_memory: bool,
+    forget_memory: bool,
     wizard: bool,
     template: Option<String>,
     save_template: Option<String>,
@@ -193,12 +227,29 @@ fn opt_u64_or_env(cli: Option<u64>, env: &str) -> Option<u64> {
     cli.or_else(|| std::env::var(env).ok().and_then(|s| s.parse().ok()))
 }
 
+/// Resolve a CLI usize flag, falling back to a parsed environment variable.
+fn opt_usize_or_env(cli: Option<usize>, env: &str) -> Option<usize> {
+    cli.or_else(|| std::env::var(env).ok().and_then(|s| s.parse().ok()))
+}
+
 /// Whether a truthy boolean env var is set ("1", "true", "yes", "on").
 fn env_flag(env: &str) -> bool {
     matches!(
         std::env::var(env).ok().map(|s| s.trim().to_ascii_lowercase()),
         Some(v) if matches!(v.as_str(), "1" | "true" | "yes" | "on")
     )
+}
+
+/// Parse a boolean env var: truthy -> `Some(true)`, falsy -> `Some(false)`.
+fn env_bool(env: &str) -> Option<bool> {
+    match std::env::var(env)
+        .ok()
+        .map(|s| s.trim().to_ascii_lowercase())
+    {
+        Some(v) if matches!(v.as_str(), "1" | "true" | "yes" | "on") => Some(true),
+        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => Some(false),
+        _ => None,
+    }
 }
 
 fn parse_args(args: &[String]) -> Result<Opts, String> {
@@ -238,6 +289,16 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut barge_threshold: Option<f32> = None;
     let mut conversation_log: Option<String> = None;
     let mut system_prompt: Option<String> = None;
+    let mut memory_enabled: Option<bool> = None;
+    let mut memory_profile: Option<String> = None;
+    let mut memory_format: Option<String> = None;
+    let mut memory_model: Option<String> = None;
+    let mut memory_recent: Option<usize> = None;
+    let mut memory_fundamental_chars: Option<usize> = None;
+    let mut memory_todo_ttl_days: Option<u64> = None;
+    let mut memory_todo_max: Option<usize> = None;
+    let mut show_memory = false;
+    let mut forget_memory = false;
     let mut wizard = false;
     let mut template: Option<String> = None;
     let mut save_template: Option<String> = None;
@@ -419,6 +480,61 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 let p = args.get(i).ok_or("--system-prompt requires a value")?;
                 system_prompt = Some(p.clone());
             }
+            "--memory" => memory_enabled = Some(true),
+            "--no-memory" => memory_enabled = Some(false),
+            "--memory-profile" => {
+                i += 1;
+                let n = args.get(i).ok_or("--memory-profile requires a name")?;
+                memory_profile = Some(n.clone());
+            }
+            "--memory-format" => {
+                i += 1;
+                let f = args.get(i).ok_or("--memory-format requires a value")?;
+                if audiochat_core::MemoryFormat::parse(f).is_none() {
+                    return Err("--memory-format must be 'md' or 'json'".into());
+                }
+                memory_format = Some(f.clone());
+            }
+            "--memory-model" => {
+                i += 1;
+                let n = args.get(i).ok_or("--memory-model requires a name")?;
+                memory_model = Some(n.clone());
+            }
+            "--memory-recent" => {
+                i += 1;
+                let s = args.get(i).ok_or("--memory-recent requires a value")?;
+                memory_recent = Some(s.parse().map_err(|_| "--memory-recent must be a number")?);
+            }
+            "--memory-fundamental-chars" => {
+                i += 1;
+                let s = args
+                    .get(i)
+                    .ok_or("--memory-fundamental-chars requires a value")?;
+                memory_fundamental_chars = Some(
+                    s.parse()
+                        .map_err(|_| "--memory-fundamental-chars must be a number")?,
+                );
+            }
+            "--memory-todo-ttl-days" => {
+                i += 1;
+                let s = args
+                    .get(i)
+                    .ok_or("--memory-todo-ttl-days requires a value")?;
+                memory_todo_ttl_days = Some(
+                    s.parse()
+                        .map_err(|_| "--memory-todo-ttl-days must be a number")?,
+                );
+            }
+            "--memory-todo-max" => {
+                i += 1;
+                let s = args.get(i).ok_or("--memory-todo-max requires a value")?;
+                memory_todo_max = Some(
+                    s.parse()
+                        .map_err(|_| "--memory-todo-max must be a number")?,
+                );
+            }
+            "--show-memory" => show_memory = true,
+            "--forget-memory" => forget_memory = true,
             "--wizard" => wizard = true,
             "--template" => {
                 i += 1;
@@ -489,6 +605,22 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         barge_threshold,
         conversation_log: opt_or_env(conversation_log, "AUDIOCHAT_CONVERSATION_LOG"),
         system_prompt: opt_or_env(system_prompt, "AUDIOCHAT_SYSTEM_PROMPT"),
+        memory_enabled: memory_enabled.or_else(|| env_bool("AUDIOCHAT_MEMORY")),
+        memory_profile: opt_or_env(memory_profile, "AUDIOCHAT_MEMORY_PROFILE"),
+        memory_format: opt_or_env(memory_format, "AUDIOCHAT_MEMORY_FORMAT"),
+        memory_model: opt_or_env(memory_model, "AUDIOCHAT_MEMORY_MODEL"),
+        memory_recent: opt_usize_or_env(memory_recent, "AUDIOCHAT_MEMORY_RECENT"),
+        memory_fundamental_chars: opt_usize_or_env(
+            memory_fundamental_chars,
+            "AUDIOCHAT_MEMORY_FUNDAMENTAL_CHARS",
+        ),
+        memory_todo_ttl_days: opt_u64_or_env(
+            memory_todo_ttl_days,
+            "AUDIOCHAT_MEMORY_TODO_TTL_DAYS",
+        ),
+        memory_todo_max: opt_usize_or_env(memory_todo_max, "AUDIOCHAT_MEMORY_TODO_MAX"),
+        show_memory,
+        forget_memory,
         wizard,
         template,
         save_template,
@@ -671,6 +803,163 @@ fn build_filler(opts: &Opts) -> Option<Box<dyn Llm + Send>> {
     Some(Box::new(client))
 }
 
+/// Build the summarizer client used to rewrite memory at the end of a session.
+/// It is stateless (OpenAI-compatible) or a fresh client (Ollama), so it never
+/// pollutes the conversation history. Returns `None` when no model is available.
+fn build_memory_llm(opts: &Opts) -> Option<Box<dyn Llm>> {
+    let provider = llm_provider(opts);
+    let system = audiochat_core::memory::MEMORY_SYSTEM_PROMPT.to_string();
+    match provider {
+        "ollama" => {
+            let base = opts
+                .llm_url
+                .clone()
+                .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
+            let model = opts
+                .memory_model
+                .clone()
+                .or_else(|| opts.llm_model.clone())?;
+            if model.trim().is_empty() {
+                return None;
+            }
+            Some(Box::new(
+                Ollama::with_base(base, model)
+                    .with_system_prompt(Some(system))
+                    .with_temperature(Some(0.2)),
+            ))
+        }
+        provider @ ("openai" | "opencode-go") => {
+            let base = match opts.llm_url.clone() {
+                Some(url) => url,
+                None if provider == "opencode-go" => OPENCODE_GO_URL.to_string(),
+                None => return None,
+            };
+            let model = opts
+                .memory_model
+                .clone()
+                .or_else(|| opts.filler_model.clone())
+                .or_else(|| {
+                    (provider == "opencode-go").then(|| OPENCODE_GO_DEFAULT_MODEL.to_string())
+                })?;
+            if model.trim().is_empty() {
+                return None;
+            }
+            let mut client = OpenAiCompatible::with_base(base, model)
+                .with_stateless(true)
+                .with_thinking(Some(false))
+                .with_system_prompt(Some(system))
+                .with_temperature(Some(0.2));
+            let key = opts.llm_api_key.clone().or_else(|| {
+                if provider == "opencode-go" {
+                    opencode_go_api_key()
+                } else {
+                    None
+                }
+            });
+            if let Some(key) = key {
+                client = client.with_api_key(key);
+            }
+            Some(Box::new(client))
+        }
+        _ => None,
+    }
+}
+
+/// Loaded memory state for the active run: the store injected into the prompt,
+/// where to write the update, the enforced limits, and the summarizer.
+struct ActiveMemory {
+    profile: String,
+    path: PathBuf,
+    store: Memory,
+    limits: MemoryLimits,
+    llm: Option<Box<dyn Llm>>,
+}
+
+/// Resolve the memory profile: explicit name, else the template name, else
+/// `default`.
+fn resolve_memory_profile(opts: &Opts, template_name: Option<&str>) -> String {
+    opts.memory_profile
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| template_name.map(str::to_string))
+        .unwrap_or_else(|| "default".to_string())
+}
+
+/// Resolve the effective per-category limits from the flags/env.
+fn memory_limits(opts: &Opts) -> MemoryLimits {
+    let d = MemoryLimits::default();
+    MemoryLimits {
+        recent_max: opts.memory_recent.unwrap_or(d.recent_max),
+        fundamental_max_chars: opts
+            .memory_fundamental_chars
+            .unwrap_or(d.fundamental_max_chars),
+        todo_ttl_days: opts.memory_todo_ttl_days.unwrap_or(d.todo_ttl_days),
+        todo_max: opts.memory_todo_max.unwrap_or(d.todo_max),
+    }
+}
+
+/// Load the profile's memory and fold it into `opts.system_prompt` so it reaches
+/// the next request. Runs after any `--save-*` so the augmented prompt is never
+/// persisted back into a template or the defaults file.
+fn setup_memory(opts: &mut Opts, template_name: Option<&str>) -> Result<ActiveMemory, String> {
+    let profile = resolve_memory_profile(opts, template_name);
+    let path = template::memory_path(&profile)?;
+    let store = Memory::load(&path)?;
+    let format = opts
+        .memory_format
+        .as_deref()
+        .and_then(MemoryFormat::parse)
+        .unwrap_or(MemoryFormat::Markdown);
+    let block = store.render(format, audiochat_core::memory::now_unix());
+    if !block.is_empty() {
+        let base = opts
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+        opts.system_prompt = Some(format!("{base}\n\n{block}"));
+    }
+    let llm = build_memory_llm(opts);
+    if llm.is_none() {
+        eprintln!(
+            "audiochat: memory is on but no summarizer model is available; \
+             the existing memory will be injected but not updated"
+        );
+    }
+    Ok(ActiveMemory {
+        profile,
+        path,
+        store,
+        limits: memory_limits(opts),
+        llm,
+    })
+}
+
+/// Rewrite and persist memory from this session's turns (best effort).
+fn update_memory(mem: &ActiveMemory, turns: &[(String, String)]) {
+    if turns.is_empty() {
+        return;
+    }
+    let Some(llm) = mem.llm.as_ref() else {
+        return;
+    };
+    let mut transcript = String::new();
+    for (user, assistant) in turns {
+        transcript.push_str(&format!("User: {user}\nAssistant: {assistant}\n"));
+    }
+    let transcript = audiochat_core::memory::trim_transcript(&transcript);
+    let now = audiochat_core::memory::now_unix();
+    match mem
+        .store
+        .update(llm.as_ref(), &transcript, &mem.limits, now)
+    {
+        Ok(updated) => match updated.save(&mem.path) {
+            Ok(()) => println!("audiochat: memory '{}' updated.", mem.profile),
+            Err(e) => eprintln!("audiochat: failed to save memory: {e}"),
+        },
+        Err(e) => eprintln!("audiochat: memory update failed: {e}"),
+    }
+}
+
 /// Build the TTS engine selected by `--tts-backend`.
 fn build_tts(
     opts: &Opts,
@@ -775,7 +1064,10 @@ fn run_stt(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     Ok(())
 }
 
-fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_s2s(
+    opts: &Opts,
+    memory: Option<&ActiveMemory>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let llm = build_llm(opts)?;
     if llm.model().is_empty() {
         return Err("--s2s requires --llm-model <name>".into());
@@ -830,8 +1122,11 @@ fn run_s2s(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     .map_err(|e| format!("failed to install signal handler: {e}"))?;
 
     println!("audiochat: speech-to-speech mode. Speak to ask; Ctrl-C to stop.");
-    session.run(mic, stt, pipeline, Some(stop))?;
+    let turns = session.run(mic, stt, pipeline, Some(stop))?;
     println!("\naudiochat: stopped.");
+    if let Some(mem) = memory {
+        update_memory(mem, &turns);
+    }
     Ok(())
 }
 
@@ -873,6 +1168,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // They seed the wizard and act as the lowest-priority layer for a normal run.
     let global_defaults = config::load_defaults()?;
 
+    // The active template's name, used as the default memory profile.
+    let mut active_template_name: Option<String> = None;
+
     // The wizard produces a template which may then be saved and/or applied.
     if opts.wizard || opts.edit_template.is_some() {
         let mut baseline = match &opts.edit_template {
@@ -890,6 +1188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             wizard::WizardOutcome::Configured { template, run_now } => {
                 template.apply_to_opts(&mut opts);
+                active_template_name = template.name.clone();
                 if run_now {
                     opts.s2s = true;
                     opts.prompt = None;
@@ -902,6 +1201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else if let Some(name) = opts.template.take() {
         let loaded = template::Template::load(&name)?;
         loaded.apply_to_opts(&mut opts);
+        active_template_name = Some(name.clone());
         // A template that configures a full stack implies speech-to-speech when
         // the user didn't pick a mode explicitly.
         if !has_explicit_mode(&opts) && loaded.effective_mode() == Some("s2s") {
@@ -914,6 +1214,34 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // already filled their fields, so this only supplies what is still unset.
     if let Some(defaults) = &global_defaults {
         defaults.apply_to_opts(&mut opts);
+    }
+
+    // Memory inspection/reset is terminal, like template management.
+    if opts.show_memory || opts.forget_memory {
+        let profile = resolve_memory_profile(&opts, active_template_name.as_deref());
+        let path = template::memory_path(&profile)?;
+        if opts.forget_memory {
+            match std::fs::remove_file(&path) {
+                Ok(()) => println!("deleted memory '{profile}'"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    println!("no memory for profile '{profile}'");
+                }
+                Err(e) => {
+                    return Err(format!("failed to delete {}: {e}", path.display()).into());
+                }
+            }
+        } else {
+            let store = Memory::load(&path)?;
+            if store.is_empty() {
+                println!("memory '{profile}' is empty ({})", path.display());
+            } else {
+                println!(
+                    "{}",
+                    store.render(MemoryFormat::Markdown, audiochat_core::memory::now_unix())
+                );
+            }
+        }
+        return Ok(());
     }
 
     if opts.save_config {
@@ -934,8 +1262,16 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
+    // Load persistent memory into the prompt. Done after any --save-* so the
+    // augmented system prompt is never written back into a template.
+    let memory = if opts.memory_enabled == Some(true) {
+        Some(setup_memory(&mut opts, active_template_name.as_deref())?)
+    } else {
+        None
+    };
+
     if opts.s2s {
-        return run_s2s(&opts);
+        return run_s2s(&opts, memory.as_ref());
     }
     if opts.prompt.is_some() {
         return run_llm(&opts);

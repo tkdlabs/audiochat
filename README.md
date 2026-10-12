@@ -80,8 +80,8 @@ recognizer that transcribes while you speak is a future addition.
 ## Setup wizard & templates
 
 `--wizard` walks through the STT, TTS, and LLM backends plus the system prompt
-with arrow-key menus, then saves the result as a named template and/or launches
-speech-to-speech. Model fields are populated from what the backends actually
+and optional [persistent memory](#persistent-memory) with arrow-key menus, then
+saves the result as a named template and/or launches speech-to-speech. Model fields are populated from what the backends actually
 report — audio.cpp's `/v1/models` (ASR/TTS), Ollama's `/api/tags`, and
 OpenAI-compatible `/v1/models` — while local whisper/Piper files are found under
 `models/`; every list has a "Type manually" escape hatch:
@@ -311,6 +311,48 @@ the conversation history. This needs an OpenAI-compatible provider (`openai` or
 `opencode-go`); it is ignored otherwise. With `--verbose` the holding-line
 latency is reported as `holding-first=…ms`.
 
+### Persistent memory
+
+With `--memory` (env `AUDIOCHAT_MEMORY=1`), audiochat keeps a small memory per
+**profile** and folds it into the assistant's system prompt, so it recalls
+earlier conversations. Memory is written at the **end of an `--s2s` session**,
+when a fast, stateless summarizer model rewrites the store from that session's
+turns — no per-turn latency is added. Templates carry the settings
+(`memory.enabled`, `memory.profile`, `memory.format`, limits); the mutable store
+lives outside the template under `<config_dir>/memory/<profile>.json` (profile
+defaults to the template name, then `default`).
+
+Three categories are kept, each with its own expiry:
+
+| Category | Content | Expiry | Default |
+|---|---|---|---|
+| `recent` | one-line summary per past conversation | count-based (newest N) | 8 |
+| `fundamental` | durable facts, opinions, preferences | permanent, strict length | 1200 chars |
+| `todo` | follow-ups to raise next time | time-based (TTL) + count | 14 days / 10 |
+
+```
+# Recall past conversations and update memory when you quit:
+cargo run --release -p audiochat-cli -- --s2s --memory \
+  --llm-provider opencode-go --tts-backend audiocpp
+
+# Inspect or clear a profile (no mic is opened):
+cargo run -p audiochat-cli -- --show-memory --memory-profile work
+cargo run -p audiochat-cli -- --forget-memory --memory-profile work
+```
+
+The summarizer is a separate **stateless** call (like the holding line), so it
+never pollutes the conversation history. It uses `--memory-model` (env
+`AUDIOCHAT_MEMORY_MODEL`), falling back to `--filler-model` and then the
+provider default. If no suitable model is available the existing memory is still
+injected, it just isn't updated at exit. Tune the categories with
+`--memory-recent`, `--memory-fundamental-chars`, `--memory-todo-ttl-days`, and
+`--memory-todo-max`; choose how memory is injected with `--memory-format md`
+(default) or `json`, and name a profile with `--memory-profile`. `--no-memory`
+overrides a template that enables it.
+
+Memory stores excerpts of your conversations on disk; keep profiles separate for
+different personas or contexts and delete them with `--forget-memory`.
+
 ## Speech-to-speech (end to end)
 
 `--s2s` drives the full loop: mic -> VAD -> STT -> LLM -> Piper -> speaker.
@@ -376,8 +418,11 @@ All options have `AUDIOCHAT_*` env-var fallbacks (`AUDIOCHAT_DEVICE`,
 `AUDIOCHAT_STT_LANGUAGE`, `AUDIOCHAT_TTS_BACKEND`, `AUDIOCHAT_TTS_MODEL`,
 `AUDIOCHAT_TTS_URL`, `AUDIOCHAT_TTS_VOICE`, `AUDIOCHAT_PYTHON`,
 `AUDIOCHAT_LLM_PROVIDER`, `AUDIOCHAT_LLM_MODEL`, `AUDIOCHAT_LLM_URL`,
-`AUDIOCHAT_LLM_API_KEY`, `AUDIOCHAT_PAUSE`, `AUDIOCHAT_STOP_WORD`); flags take
-precedence. `--s2s` handles Ctrl-C gracefully,
+`AUDIOCHAT_LLM_API_KEY`, `AUDIOCHAT_PAUSE`, `AUDIOCHAT_STOP_WORD`,
+`AUDIOCHAT_MEMORY`, `AUDIOCHAT_MEMORY_PROFILE`, `AUDIOCHAT_MEMORY_FORMAT`,
+`AUDIOCHAT_MEMORY_MODEL`, `AUDIOCHAT_MEMORY_RECENT`,
+`AUDIOCHAT_MEMORY_FUNDAMENTAL_CHARS`, `AUDIOCHAT_MEMORY_TODO_TTL_DAYS`,
+`AUDIOCHAT_MEMORY_TODO_MAX`); flags take precedence. `--s2s` handles Ctrl-C gracefully,
 shutting down the capture thread and stopping playback before exit.
 
 `--conversation-log conversations.jsonl` (env `AUDIOCHAT_CONVERSATION_LOG`) is a

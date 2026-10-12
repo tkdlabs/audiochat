@@ -34,6 +34,8 @@ pub struct Template {
     pub device: Option<String>,
     #[serde(default)]
     pub audio: AudioTemplate,
+    #[serde(default)]
+    pub memory: MemoryTemplate,
 }
 
 /// Speech-to-text selection. `model` is the whisper `.bin` path for the whisper
@@ -116,6 +118,37 @@ pub struct AudioTemplate {
     pub barge_threshold: Option<f32>,
 }
 
+/// Persistent-memory settings. The mutable store lives outside the template
+/// (under `<config_dir>/memory/<profile>.json`); this only carries the knobs.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryTemplate {
+    /// Whether to load and update persistent memory for this profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Memory profile name. Defaults to the template name, then `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// How memory is injected into the system prompt: `md` (default) or `json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Model used to summarize at session end; defaults to the holding-line
+    /// model, then the provider default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Maximum number of recent-conversation summaries retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_max: Option<usize>,
+    /// Maximum combined characters of durable facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fundamental_max_chars: Option<usize>,
+    /// Days after which an unresolved follow-up is dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo_ttl_days: Option<u64>,
+    /// Maximum number of open follow-ups retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo_max: Option<usize>,
+}
+
 /// Root config directory, honouring `AUDIOCHAT_CONFIG_DIR`, then
 /// `XDG_CONFIG_HOME`, then `~/.config`.
 pub fn config_dir() -> PathBuf {
@@ -136,11 +169,11 @@ pub fn templates_dir() -> PathBuf {
     config_dir().join("templates")
 }
 
-/// Validate a template name and resolve its file path.
-fn template_path(name: &str) -> Result<PathBuf, String> {
+/// Validate a template or memory-profile name (letters, digits, `-`, `_`).
+fn validate_name(name: &str) -> Result<&str, String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("template name must not be empty".into());
+        return Err("name must not be empty".into());
     }
     if name == "."
         || name == ".."
@@ -149,10 +182,25 @@ fn template_path(name: &str) -> Result<PathBuf, String> {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
     {
         return Err(format!(
-            "invalid template name '{name}' (use letters, digits, '-', '_')"
+            "invalid name '{name}' (use letters, digits, '-', '_')"
         ));
     }
-    Ok(templates_dir().join(format!("{name}.json")))
+    Ok(name)
+}
+
+/// Validate a template name and resolve its file path.
+fn template_path(name: &str) -> Result<PathBuf, String> {
+    Ok(templates_dir().join(format!("{}.json", validate_name(name)?)))
+}
+
+/// Directory holding per-profile memory stores.
+pub fn memory_dir() -> PathBuf {
+    config_dir().join("memory")
+}
+
+/// Resolve a memory profile's store path, validating the name.
+pub fn memory_path(profile: &str) -> Result<PathBuf, String> {
+    Ok(memory_dir().join(format!("{}.json", validate_name(profile)?)))
 }
 
 /// Fill an `Option` slot only when it is currently empty (flags/env win).
@@ -215,6 +263,23 @@ impl AudioTemplate {
     }
 }
 
+impl MemoryTemplate {
+    /// Copy fields that are still unset from `other`.
+    fn fill_from(&mut self, other: &MemoryTemplate) {
+        fill(&mut self.enabled, other.enabled.as_ref());
+        fill(&mut self.profile, other.profile.as_ref());
+        fill(&mut self.format, other.format.as_ref());
+        fill(&mut self.model, other.model.as_ref());
+        fill(&mut self.recent_max, other.recent_max.as_ref());
+        fill(
+            &mut self.fundamental_max_chars,
+            other.fundamental_max_chars.as_ref(),
+        );
+        fill(&mut self.todo_ttl_days, other.todo_ttl_days.as_ref());
+        fill(&mut self.todo_max, other.todo_max.as_ref());
+    }
+}
+
 impl Template {
     /// Fill any unset field from `other`, leaving set fields untouched. Used to
     /// seed the wizard baseline with the global defaults so a template being
@@ -229,6 +294,7 @@ impl Template {
         self.tts.fill_from(&other.tts);
         self.llm.fill_from(&other.llm);
         self.audio.fill_from(&other.audio);
+        self.memory.fill_from(&other.memory);
     }
 
     /// The mode this template should run in. Uses the explicit `mode` when set,
@@ -386,6 +452,21 @@ impl Template {
                 opts.barge_threshold = Some(v);
             }
         }
+
+        fill(&mut opts.memory_enabled, self.memory.enabled.as_ref());
+        fill(&mut opts.memory_profile, self.memory.profile.as_ref());
+        fill(&mut opts.memory_format, self.memory.format.as_ref());
+        fill(&mut opts.memory_model, self.memory.model.as_ref());
+        fill(&mut opts.memory_recent, self.memory.recent_max.as_ref());
+        fill(
+            &mut opts.memory_fundamental_chars,
+            self.memory.fundamental_max_chars.as_ref(),
+        );
+        fill(
+            &mut opts.memory_todo_ttl_days,
+            self.memory.todo_ttl_days.as_ref(),
+        );
+        fill(&mut opts.memory_todo_max, self.memory.todo_max.as_ref());
     }
 
     /// Snapshot the resolved effective options as a template. The API key is
@@ -442,6 +523,16 @@ impl Template {
             barge_in: Some(opts.barge_in),
             barge_threshold: opts.barge_threshold,
         };
+        let memory = MemoryTemplate {
+            enabled: opts.memory_enabled,
+            profile: opts.memory_profile.clone(),
+            format: opts.memory_format.clone(),
+            model: opts.memory_model.clone(),
+            recent_max: opts.memory_recent,
+            fundamental_max_chars: opts.memory_fundamental_chars,
+            todo_ttl_days: opts.memory_todo_ttl_days,
+            todo_max: opts.memory_todo_max,
+        };
         Template {
             name: None,
             description: None,
@@ -460,6 +551,7 @@ impl Template {
             system_prompt: opts.system_prompt.clone(),
             device: opts.device.clone(),
             audio,
+            memory,
         }
     }
 }
@@ -522,10 +614,46 @@ mod tests {
                 pause_ms: Some(2000),
                 ..Default::default()
             },
+            memory: MemoryTemplate {
+                enabled: Some(true),
+                profile: Some("work".into()),
+                format: Some("json".into()),
+                recent_max: Some(6),
+                fundamental_max_chars: Some(800),
+                todo_ttl_days: Some(7),
+                todo_max: Some(5),
+                ..Default::default()
+            },
         };
         let json = serde_json::to_string(&template).unwrap();
         let back: Template = serde_json::from_str(&json).unwrap();
         assert_eq!(template, back);
+    }
+
+    #[test]
+    fn memory_round_trips_via_opts() {
+        let opts = crate::parse_args(&[
+            "--memory".into(),
+            "--memory-profile".into(),
+            "work".into(),
+            "--memory-format".into(),
+            "json".into(),
+            "--memory-recent".into(),
+            "6".into(),
+        ])
+        .unwrap();
+        let template = Template::from_opts(&opts);
+        assert_eq!(template.memory.enabled, Some(true));
+        assert_eq!(template.memory.profile.as_deref(), Some("work"));
+        assert_eq!(template.memory.format.as_deref(), Some("json"));
+        assert_eq!(template.memory.recent_max, Some(6));
+
+        let mut restored = crate::parse_args(&[]).unwrap();
+        template.apply_to_opts(&mut restored);
+        assert_eq!(restored.memory_enabled, Some(true));
+        assert_eq!(restored.memory_profile.as_deref(), Some("work"));
+        assert_eq!(restored.memory_format.as_deref(), Some("json"));
+        assert_eq!(restored.memory_recent, Some(6));
     }
 
     #[test]
@@ -631,7 +759,8 @@ mod tests {
     #[test]
     fn fill_from_supplies_only_unset_fields() {
         let mut template: Template =
-            serde_json::from_str(r#"{"stt":{"backend":"whisper"},"tts":{"voice":"Kept"}}"#).unwrap();
+            serde_json::from_str(r#"{"stt":{"backend":"whisper"},"tts":{"voice":"Kept"}}"#)
+                .unwrap();
         let defaults: Template = serde_json::from_str(
             r#"{"stt":{"backend":"audiocpp","url":"http://gpu:8080"},"tts":{"voice":"Dylan","model":"qwen3-tts"}}"#,
         )
@@ -664,8 +793,7 @@ mod tests {
 
     #[test]
     fn tts_instruct_round_trips_via_template() {
-        let opts =
-            crate::parse_args(&["--tts-instruct".into(), "Speak slowly".into()]).unwrap();
+        let opts = crate::parse_args(&["--tts-instruct".into(), "Speak slowly".into()]).unwrap();
         let template = Template::from_opts(&opts);
         assert_eq!(template.tts.instruct.as_deref(), Some("Speak slowly"));
         let mut restored = crate::parse_args(&[]).unwrap();

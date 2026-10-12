@@ -658,14 +658,15 @@ impl Session {
     /// are transcribed in parallel with the current turn's LLM/TTS work, so a
     /// queued turn is ready by the time the main loop reaches it. If `stop` is
     /// provided, the loop polls it and returns cleanly when it becomes `true`
-    /// (e.g. on Ctrl-C).
+    /// (e.g. on Ctrl-C). Returns the completed `(question, reply)` turns so the
+    /// caller can update persistent memory.
     pub fn run(
         self,
         mic: MicCapture,
         stt: Box<dyn SpeechRecognizer>,
         mut pipeline: Pipeline,
         stop: Option<Arc<AtomicBool>>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    ) -> Result<Vec<(String, String)>, Box<dyn Error + Send + Sync>> {
         let gate = Arc::new(AtomicBool::new(false));
         let barge = Arc::new(AtomicBool::new(false));
         let pause = Arc::new(AtomicU64::new(self.effective_pause_ms()));
@@ -740,11 +741,12 @@ impl Session {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
+        let turns = pipeline.take_turns();
         stt_handle.join().map_err(|_| "STT thread panicked")?;
         capture_handle
             .join()
             .map_err(|_| "capture thread panicked")?;
-        Ok(())
+        Ok(turns)
     }
 }
 
