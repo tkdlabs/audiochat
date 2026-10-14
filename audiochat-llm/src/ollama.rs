@@ -86,6 +86,7 @@ impl Ollama {
         let client = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(300)))
             .timeout_recv_body(Some(Duration::from_secs(300)))
+            .http_status_as_error(false)
             .build()
             .new_agent();
         Self {
@@ -185,8 +186,15 @@ impl Llm for Ollama {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            let detail = resp.into_body().read_to_string().unwrap_or_default();
+            let detail = detail.trim();
+            let detail = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            };
             return Err(Box::<dyn Error + Send + Sync>::from(OllamaError(format!(
-                "ollama returned status {status}"
+                "ollama returned status {status}{detail}"
             ))));
         }
 

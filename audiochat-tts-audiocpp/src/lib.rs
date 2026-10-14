@@ -70,6 +70,7 @@ impl AudioCppTts {
         let client = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(120)))
             .timeout_recv_body(Some(Duration::from_secs(120)))
+            .http_status_as_error(false)
             .build()
             .new_agent();
         Self {
