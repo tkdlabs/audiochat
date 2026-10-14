@@ -97,6 +97,9 @@ Options:
   --memory-todo-max N Follow-ups retained (default: 10).
   --show-memory       Print the profile's memory (Markdown) and exit.
   --forget-memory     Delete the profile's memory store and exit.
+  --timestamps        Prepend the wall-clock time and the gap since the previous
+                      exchange to each prompt (default: off).
+  --no-timestamps     Disable timestamp side-information.
   -v, --verbose       Print per-turn latency metrics in --s2s.
   --silent            In --s2s, print replies but do not speak them.
 
@@ -149,7 +152,8 @@ Environment (flag takes precedence):
   AUDIOCHAT_MEMORY_RECENT    recent-chat summaries retained
   AUDIOCHAT_MEMORY_FUNDAMENTAL_CHARS  durable-facts character cap
   AUDIOCHAT_MEMORY_TODO_TTL_DAYS      follow-up expiry in days
-  AUDIOCHAT_MEMORY_TODO_MAX  follow-ups retained";
+  AUDIOCHAT_MEMORY_TODO_MAX  follow-ups retained
+  AUDIOCHAT_TIMESTAMPS    set to 1/true to prepend time side-information";
 
 struct Opts {
     model: Option<PathBuf>,
@@ -196,6 +200,7 @@ struct Opts {
     memory_fundamental_chars: Option<usize>,
     memory_todo_ttl_days: Option<u64>,
     memory_todo_max: Option<usize>,
+    timestamps: Option<bool>,
     show_memory: bool,
     forget_memory: bool,
     wizard: bool,
@@ -297,6 +302,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut memory_fundamental_chars: Option<usize> = None;
     let mut memory_todo_ttl_days: Option<u64> = None;
     let mut memory_todo_max: Option<usize> = None;
+    let mut timestamps: Option<bool> = None;
     let mut show_memory = false;
     let mut forget_memory = false;
     let mut wizard = false;
@@ -533,6 +539,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                         .map_err(|_| "--memory-todo-max must be a number")?,
                 );
             }
+            "--timestamps" => timestamps = Some(true),
+            "--no-timestamps" => timestamps = Some(false),
             "--show-memory" => show_memory = true,
             "--forget-memory" => forget_memory = true,
             "--wizard" => wizard = true,
@@ -619,6 +627,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
             "AUDIOCHAT_MEMORY_TODO_TTL_DAYS",
         ),
         memory_todo_max: opt_usize_or_env(memory_todo_max, "AUDIOCHAT_MEMORY_TODO_MAX"),
+        timestamps: timestamps.or_else(|| env_bool("AUDIOCHAT_TIMESTAMPS")),
         show_memory,
         forget_memory,
         wizard,
@@ -1008,13 +1017,25 @@ fn run_llm(opts: &Opts) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         return Err("--prompt requires --llm-model <name>".into());
     }
     let prompt = opts.prompt.as_deref().unwrap_or_default();
+    let prompt = if opts.timestamps == Some(true) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!(
+            "{}\n{prompt}",
+            audiochat_core::timefmt::context_line(now, None)
+        )
+    } else {
+        prompt.to_string()
+    };
 
     println!(
         "audiochat: asking {} ({})...",
         llm_provider(opts),
         client.model()
     );
-    let mut resp = client.generate(prompt)?;
+    let mut resp = client.generate(&prompt)?;
     if let Some(stream) = resp.stream.take() {
         for item in stream {
             let chunk = item?;
@@ -1078,6 +1099,7 @@ fn run_s2s(
     let mut pipeline = Pipeline::new(llm, tts).with_filler(build_filler(opts));
     pipeline.speak_replies = !opts.silent;
     pipeline.verbose = opts.verbose;
+    pipeline.timestamps = opts.timestamps == Some(true);
     if let Some(path) = &opts.conversation_log {
         let logger = ConversationLogger::open(std::path::Path::new(path))
             .map_err(|e| format!("failed to open conversation log {path}: {e}"))?;

@@ -36,6 +36,10 @@ pub struct Template {
     pub audio: AudioTemplate,
     #[serde(default)]
     pub memory: MemoryTemplate,
+    /// Prepend wall-clock time and the gap since the previous exchange to each
+    /// prompt, for the model's time awareness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamps: Option<bool>,
 }
 
 /// Speech-to-text selection. `model` is the whisper `.bin` path for the whisper
@@ -290,6 +294,7 @@ impl Template {
         fill(&mut self.mode, other.mode.as_ref());
         fill(&mut self.system_prompt, other.system_prompt.as_ref());
         fill(&mut self.device, other.device.as_ref());
+        fill(&mut self.timestamps, other.timestamps.as_ref());
         self.stt.fill_from(&other.stt);
         self.tts.fill_from(&other.tts);
         self.llm.fill_from(&other.llm);
@@ -415,6 +420,7 @@ impl Template {
 
         fill(&mut opts.system_prompt, self.system_prompt.as_ref());
         fill(&mut opts.device, self.device.as_ref());
+        fill(&mut opts.timestamps, self.timestamps.as_ref());
 
         if let Some(v) = self.audio.vad_threshold {
             if opts.vad_threshold.is_none() {
@@ -552,6 +558,7 @@ impl Template {
             device: opts.device.clone(),
             audio,
             memory,
+            timestamps: opts.timestamps,
         }
     }
 }
@@ -624,10 +631,22 @@ mod tests {
                 todo_max: Some(5),
                 ..Default::default()
             },
+            timestamps: Some(true),
         };
         let json = serde_json::to_string(&template).unwrap();
         let back: Template = serde_json::from_str(&json).unwrap();
         assert_eq!(template, back);
+    }
+
+    #[test]
+    fn timestamps_round_trips_via_opts() {
+        let opts = crate::parse_args(&["--timestamps".into()]).unwrap();
+        let template = Template::from_opts(&opts);
+        assert_eq!(template.timestamps, Some(true));
+
+        let mut restored = crate::parse_args(&[]).unwrap();
+        template.apply_to_opts(&mut restored);
+        assert_eq!(restored.timestamps, Some(true));
     }
 
     #[test]

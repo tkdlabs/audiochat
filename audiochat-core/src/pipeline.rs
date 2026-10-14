@@ -4,7 +4,7 @@ use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::audio_sink::AudioSink;
 use crate::config::AudioConfig;
@@ -199,6 +199,11 @@ pub struct Pipeline {
     /// Completed `(question, reply)` turns for this session, used to update
     /// persistent memory when the session ends.
     turns: Vec<(String, String)>,
+    /// Whether to prepend wall-clock time and the gap since the previous
+    /// exchange to each prompt, so the model has time awareness.
+    pub timestamps: bool,
+    /// When the previous turn finished, for the "time since last message" field.
+    last_message_at: Option<Instant>,
 }
 
 /// A job for the holding-line worker: the user's question plus a per-turn
@@ -290,6 +295,8 @@ impl Pipeline {
             conversation_log: None,
             filler: None,
             turns: Vec::new(),
+            timestamps: false,
+            last_message_at: None,
         }
     }
 
@@ -365,6 +372,40 @@ impl Pipeline {
         completed_at: Instant,
         speech: SpeechTiming,
     ) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+        let result = self.respond_inner(question, completed_at, speech);
+        // Record when this turn ended so the next turn can report the gap.
+        if !question.trim().is_empty() {
+            self.last_message_at = Some(Instant::now());
+        }
+        result
+    }
+
+    /// Build the prompt to send, optionally prefixed with a bracketed
+    /// side-information line carrying the wall-clock time and the gap since the
+    /// previous exchange. The raw `question` is still what is printed and logged.
+    fn build_prompt(&self, question: &str, completed_at: Instant) -> String {
+        if !self.timestamps {
+            return question.to_string();
+        }
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let gap = self
+            .last_message_at
+            .map(|prev| completed_at.saturating_duration_since(prev));
+        format!(
+            "{}\n{question}",
+            crate::timefmt::context_line(now_secs, gap)
+        )
+    }
+
+    fn respond_inner(
+        &mut self,
+        question: &str,
+        completed_at: Instant,
+        speech: SpeechTiming,
+    ) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
         let start = completed_at;
         let mut timing = TurnTiming {
             vad_ms: speech.vad_ms,
@@ -379,9 +420,10 @@ impl Pipeline {
         println!("you:  {question}");
 
         println!("ai:   ",);
+        let prompt = self.build_prompt(question, completed_at);
         // Gate is FALSE here, so a background capture thread still records the
         // user's speech during the (potentially long) LLM latency ahead.
-        let mut resp = with_retry("llm generate", 3, 300, || self.llm.generate(question))?;
+        let mut resp = with_retry("llm generate", 3, 300, || self.llm.generate(&prompt))?;
         let mut reply = String::new();
         let mut segment = String::new();
         let mut saw_first_token = false;
@@ -702,6 +744,47 @@ mod tests {
         fn synthesize(&mut self, _text: &str) -> Result<Vec<i16>, Box<dyn Error + Send + Sync>> {
             Ok(Vec::new())
         }
+    }
+
+    #[test]
+    fn timestamps_prefix_the_prompt() {
+        use crate::traits::{LlmResponse, LlmStreamItem};
+        use std::sync::Mutex;
+
+        struct Recorder {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        impl Llm for Recorder {
+            fn generate(&self, prompt: &str) -> Result<LlmResponse, Box<dyn Error + Send + Sync>> {
+                self.seen.lock().unwrap().push(prompt.to_string());
+                let items: Vec<LlmStreamItem> = vec![Ok("ok".to_string())];
+                Ok(LlmResponse {
+                    stream: Some(Box::new(items.into_iter())),
+                    full: String::new(),
+                })
+            }
+            fn model(&self) -> &str {
+                "recorder"
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut p = Pipeline::new(
+            Box::new(Recorder {
+                seen: Arc::clone(&seen),
+            }),
+            Box::new(NoopTts),
+        );
+        p.speak_replies = false;
+        p.timestamps = true;
+        p.respond("what time is it", Instant::now(), SpeechTiming::default())
+            .unwrap();
+
+        let prompts = seen.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].starts_with("[context:"));
+        assert!(prompts[0].contains("start of session"));
+        assert!(prompts[0].ends_with("\nwhat time is it"));
     }
 
     #[test]

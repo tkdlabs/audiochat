@@ -250,3 +250,15 @@ earlier conversations:
   `--show-memory`/`--forget-memory` inspect and clear a profile.
 - Injection is best-effort: with no summarizer model the existing memory is still
   used but not rewritten; a malformed summarizer reply leaves the store intact.
+
+## Iteration 5 — timestamp side-information ✅
+
+Optional time awareness (`--timestamps`, template `timestamps`, env
+`AUDIOCHAT_TIMESTAMPS`): each prompt is prefixed with a bracketed line giving the
+wall-clock time and the gap since the previous exchange, e.g.
+`[context: 2026-10-14 15:32:07 UTC (Wednesday); 3 minutes since the previous
+exchange]`. `audiochat-core::timefmt` formats UTC (no new dependencies, since the
+standard library has no local offset); `Pipeline` tracks when the last turn
+finished to compute the gap and keeps the line in the bounded history. The raw
+question is still what is printed and logged, and the setting round-trips through
+templates, `--save-config`, and the wizard.

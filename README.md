@@ -79,9 +79,10 @@ recognizer that transcribes while you speak is a future addition.
 
 ## Setup wizard & templates
 
-`--wizard` walks through the STT, TTS, and LLM backends plus the system prompt
-and optional [persistent memory](#persistent-memory) with arrow-key menus, then
-saves the result as a named template and/or launches speech-to-speech. Model fields are populated from what the backends actually
+`--wizard` walks through the STT, TTS, and LLM backends plus the system prompt,
+optional [persistent memory](#persistent-memory), and
+[timestamp side-information](#timestamps--time-awareness) with arrow-key menus,
+then saves the result as a named template and/or launches speech-to-speech. Model fields are populated from what the backends actually
 report — audio.cpp's `/v1/models` (ASR/TTS), Ollama's `/api/tags`, and
 OpenAI-compatible `/v1/models` — while local whisper/Piper files are found under
 `models/`; every list has a "Type manually" escape hatch:
@@ -353,6 +354,23 @@ overrides a template that enables it.
 Memory stores excerpts of your conversations on disk; keep profiles separate for
 different personas or contexts and delete them with `--forget-memory`.
 
+### Timestamps & time awareness
+
+With `--timestamps` (env `AUDIOCHAT_TIMESTAMPS=1`), each prompt is prefixed with
+a bracketed side-information line giving the wall-clock time (UTC) and the time
+since the previous exchange:
+
+```
+[context: 2026-10-14 15:32:07 UTC (Wednesday); 3 minutes since the previous exchange]
+What's the weather?
+```
+
+The raw question is still what's printed and written to the conversation log; the
+line is added only for the model, and stays in the bounded conversation history so
+the model can see when each turn happened. It pairs well with persistent memory
+(both help the model reason about time). The wizard exposes the same toggle, and
+templates store it as `timestamps`.
+
 ## Speech-to-speech (end to end)
 
 `--s2s` drives the full loop: mic -> VAD -> STT -> LLM -> Piper -> speaker.
@@ -422,7 +440,7 @@ All options have `AUDIOCHAT_*` env-var fallbacks (`AUDIOCHAT_DEVICE`,
 `AUDIOCHAT_MEMORY`, `AUDIOCHAT_MEMORY_PROFILE`, `AUDIOCHAT_MEMORY_FORMAT`,
 `AUDIOCHAT_MEMORY_MODEL`, `AUDIOCHAT_MEMORY_RECENT`,
 `AUDIOCHAT_MEMORY_FUNDAMENTAL_CHARS`, `AUDIOCHAT_MEMORY_TODO_TTL_DAYS`,
-`AUDIOCHAT_MEMORY_TODO_MAX`); flags take precedence. `--s2s` handles Ctrl-C gracefully,
+`AUDIOCHAT_MEMORY_TODO_MAX`, `AUDIOCHAT_TIMESTAMPS`); flags take precedence. `--s2s` handles Ctrl-C gracefully,
 shutting down the capture thread and stopping playback before exit.
 
 `--conversation-log conversations.jsonl` (env `AUDIOCHAT_CONVERSATION_LOG`) is a

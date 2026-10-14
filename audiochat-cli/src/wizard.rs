@@ -51,6 +51,7 @@ fn wizard_inner(baseline: &Template) -> Result<WizardOutcome, InquireError> {
     let llm = ask_llm(&baseline.llm)?;
     let system_prompt = ask_system_prompt(baseline.system_prompt.as_deref())?;
     let memory = ask_memory(&baseline.memory, baseline.name.as_deref())?;
+    let timestamps = ask_timestamps(baseline.timestamps)?;
     let device = text_optional("Input device (blank = default)", baseline.device.as_deref())?;
     let audio = ask_advanced(&baseline.audio)?;
 
@@ -65,6 +66,7 @@ fn wizard_inner(baseline: &Template) -> Result<WizardOutcome, InquireError> {
         device,
         audio,
         memory,
+        timestamps,
     };
 
     println!("\n{}", describe(&template));
@@ -430,6 +432,14 @@ fn ask_memory(
     })
 }
 
+fn ask_timestamps(baseline: Option<bool>) -> Result<Option<bool>, InquireError> {
+    let enabled = Confirm::new("Add timestamps & time-since-last-message to prompts?")
+        .with_default(baseline.unwrap_or(false))
+        .with_help_message("gives the model date/time awareness; off by default")
+        .prompt()?;
+    Ok(Some(enabled))
+}
+
 fn ask_advanced(baseline: &AudioTemplate) -> Result<AudioTemplate, InquireError> {
     let customize = Confirm::new("Configure advanced audio / turn-taking options?")
         .with_default(false)
@@ -517,8 +527,13 @@ fn describe(t: &Template) -> String {
     } else {
         String::new()
     };
+    let time = if t.timestamps == Some(true) {
+        " +timestamps"
+    } else {
+        ""
+    };
     format!(
-        "Summary\n  STT: {stt}{}\n  TTS: {tts}{}\n  LLM: {llm}{api_key}{}{filler}{memory}\n  Prompt: {prompt}{}",
+        "Summary\n  STT: {stt}{}\n  TTS: {tts}{}\n  LLM: {llm}{api_key}{}{filler}{memory}{time}\n  Prompt: {prompt}{}",
         model_suffix(stt, &t.stt.model, &t.stt.url),
         model_suffix(tts, &t.tts.model, &t.tts.url),
         model_suffix(llm, &t.llm.model, &t.llm.url),

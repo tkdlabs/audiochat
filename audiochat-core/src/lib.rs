@@ -9,6 +9,7 @@ pub mod memory;
 pub mod pipeline;
 pub mod resample;
 pub mod session;
+pub mod timefmt;
 pub mod traits;
 pub mod vad;
 
