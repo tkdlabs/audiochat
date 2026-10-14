@@ -255,10 +255,12 @@ earlier conversations:
 
 Optional time awareness (`--timestamps`, template `timestamps`, env
 `AUDIOCHAT_TIMESTAMPS`): each prompt is prefixed with a bracketed line giving the
-wall-clock time and the gap since the previous exchange, e.g.
-`[context: 2026-10-14 15:32:07 UTC (Wednesday); 3 minutes since the previous
-exchange]`. `audiochat-core::timefmt` formats UTC (no new dependencies, since the
-standard library has no local offset); `Pipeline` tracks when the last turn
-finished to compute the gap and keeps the line in the bounded history. The raw
-question is still what is printed and logged, and the setting round-trips through
-templates, `--save-config`, and the wizard.
+local wall-clock time (with UTC offset and a rough IANA zone) and the gap since
+the previous exchange, e.g. `[context: 2026-10-14 13:32:07 -06:00 (US/Mountain,
+Wednesday); 3 minutes since the previous exchange]`. `audiochat-core::timefmt`
+formats the local time via the C library's thread-safe `localtime_r` (Unix `libc`
+dependency; the zone name comes from `TZ` or the `/etc/localtime` symlink, with a
+UTC fallback). `Pipeline` tracks when the last turn finished to compute the gap
+and keeps the line in the bounded history. The raw question is still what is
+printed and logged, and the setting round-trips through templates,
+`--save-config`, and the wizard.

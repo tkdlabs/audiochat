@@ -357,19 +357,21 @@ different personas or contexts and delete them with `--forget-memory`.
 ### Timestamps & time awareness
 
 With `--timestamps` (env `AUDIOCHAT_TIMESTAMPS=1`), each prompt is prefixed with
-a bracketed side-information line giving the wall-clock time (UTC) and the time
-since the previous exchange:
+a bracketed side-information line giving the local wall-clock time (with UTC
+offset and a rough IANA time zone) and the time since the previous exchange:
 
 ```
-[context: 2026-10-14 15:32:07 UTC (Wednesday); 3 minutes since the previous exchange]
+[context: 2026-10-14 13:32:07 -06:00 (US/Mountain, Wednesday); 3 minutes since the previous exchange]
 What's the weather?
 ```
 
 The raw question is still what's printed and written to the conversation log; the
 line is added only for the model, and stays in the bounded conversation history so
-the model can see when each turn happened. It pairs well with persistent memory
-(both help the model reason about time). The wizard exposes the same toggle, and
-templates store it as `timestamps`.
+the model can see when each turn happened. The local offset comes from the OS
+(`localtime_r`); the zone name is taken from `TZ` or the `/etc/localtime` symlink,
+and the timestamp falls back to UTC where the offset isn't available. It pairs
+well with persistent memory (both help the model reason about time). The wizard
+exposes the same toggle, and templates store it as `timestamps`.
 
 ## Speech-to-speech (end to end)
 
